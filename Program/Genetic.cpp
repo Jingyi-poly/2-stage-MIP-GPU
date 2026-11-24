@@ -77,9 +77,8 @@ void Genetic::crossoverOX(Individual & result, const Individual & parent1, const
 	}
 
 	// Complete the individual with the Split algorithm
-	for (int i = 0; i < params.n_scenarios; ++i){
-		split.generalSplit(result, parent1.eval.nbRoutes, 0);
-	}
+	split.generalSplit(result, parent1.eval.nbRoutes, 0);
+	split.generateChromR_single(result);
 }
 
 Genetic::Genetic(Params & params) : 

@@ -7,6 +7,7 @@ void Population::generatePopulation()
 	{
 		Individual randomIndiv(params);
 		split.generalSplit(randomIndiv, params.nbVehicles, 0);
+		split.generateChromR_single(randomIndiv);
 		localSearch.run(randomIndiv, params.penaltyCapacity, params.penaltyDuration);
 		addIndividual(randomIndiv, true);
 		if (!randomIndiv.eval.isFeasible && params.ran() % 2 == 0)  // Repair half of the solutions in case of infeasibility

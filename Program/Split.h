@@ -115,6 +115,7 @@ class Split
 
   int splitSimpleReturn(Individual & indiv, int idx_scen, std::vector < std::vector <int> > & chromR_res);
   int splitLFReturn(Individual & indiv, int idx_scen, std::vector < std::vector <int> > & chromR_res);
+  int restoreRoutes(Individual & indiv, int idx_scen, std::vector<std::vector<int>>& routes);
 
 public:
 	int generateChromR(Individual & indiv, int idx_scen);

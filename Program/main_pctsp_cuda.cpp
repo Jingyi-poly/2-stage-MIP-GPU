@@ -1,3 +1,4 @@
+#include <stdexcept>
 #include "PCTSPExact.h"
 #include "SplitCUDA.h"
 #include "commandline.h"
@@ -69,21 +70,25 @@ int main(int argc, char *argv[])
             cout << "========================================" << endl;
             PCTSPResult detResult = solver.solveDeterministic();
 
-            if (!detResult.selectedNodes.empty()) {
-                cout << fixed << setprecision(2);
-                cout << "  Obj (prize - dist): " << detResult.objValue << endl;
-                cout << "  Visited: " << detResult.selectedNodes.size() - 1
-                     << "/" << params.nbClients << endl;
-                cout << "  Tour distance: " << detResult.totalDistance << endl;
-                cout << "  Optimal: " << (detResult.optimal ? "Yes" : "No") << endl;
-                cout << "  Time: " << detResult.solveTime << "s" << endl;
-            }
+            if (detResult.selectedNodes.empty())
+                throw std::runtime_error("Gurobi returned no deterministic solution. Check the diagnostics above.");
+
+            cout << fixed << setprecision(2);
+            cout << "  Obj (prize - dist): " << detResult.objValue << endl;
+            cout << "  Visited: " << detResult.selectedNodes.size() - 1
+                 << "/" << params.nbClients << endl;
+            cout << "  Tour distance: " << detResult.totalDistance << endl;
+            cout << "  Optimal: " << (detResult.optimal ? "Yes" : "No") << endl;
+            cout << "  Time: " << detResult.solveTime << "s" << endl;
 
             cout << "\n========================================" << endl;
             cout << " Stochastic PCTSP (LS)" << endl;
             cout << "========================================" << endl;
             stochResult = solver.solveStochastic();
         }
+
+        if (stochResult.selectedNodes.empty())
+            throw std::runtime_error("Gurobi returned no stochastic solution. Check the diagnostics above.");
 
         cout << "\n========================================" << endl;
         cout << " RESULT SUMMARY" << endl;
@@ -100,8 +105,8 @@ int main(int argc, char *argv[])
             if (nd != 0) cout << " " << nd;
         cout << endl;
     }
-    catch (const string & e) { cout << "EXCEPTION | " << e << endl; }
-    catch (const exception & e) { cout << "EXCEPTION | " << e.what() << endl; }
+    catch (const string & e) { cerr << "EXCEPTION | " << e << endl; return 1; }
+    catch (const exception & e) { cerr << "EXCEPTION | " << e.what() << endl; return 1; }
 
     auto tEnd = chrono::steady_clock::now();
     double tt = chrono::duration<double>(tEnd - tAllStart).count();

@@ -52,7 +52,7 @@ extern "C" Solution *solve_cvrp(
 	double vehicleCapacity, double durationLimit, char isRoundingInteger, char isDurationConstraint,
 	int max_nbVeh, const AlgorithmParameters *ap, char verbose)
 {
-	Solution *result;
+	Solution *result = nullptr;
 
 	try {
 		std::vector<double> x_coords(x, x + n);
@@ -76,6 +76,9 @@ extern "C" Solution *solve_cvrp(
 
 		Params params(x_coords,y_coords,distance_matrix,service_time,demands,vehicleCapacity,durationLimit,max_nbVeh,isDurationConstraint,verbose,*ap);
 
+		params.generate_scenario_demands(ap->n_extra_senarios);
+		params.generate_skip_penalties();
+
 		// Running HGS and returning the result
 		Genetic solver(params);
 		solver.run();
@@ -92,7 +95,7 @@ extern "C" Solution *solve_cvrp_dist_mtx(
 	double vehicleCapacity, double durationLimit, char isDurationConstraint,
 	int max_nbVeh, const AlgorithmParameters *ap, char verbose)
 {
-	Solution *result;
+	Solution *result = nullptr;
 	std::vector<double> x_coords;
 	std::vector<double> y_coords;
 
@@ -114,6 +117,9 @@ extern "C" Solution *solve_cvrp_dist_mtx(
 
 		Params params(x_coords,y_coords,distance_matrix,service_time,demands,vehicleCapacity,durationLimit,max_nbVeh,isDurationConstraint,verbose,*ap);
 		
+		params.generate_scenario_demands(ap->n_extra_senarios);
+		params.generate_skip_penalties();
+
 		// Running HGS and returning the result
 		Genetic solver(params);
 		solver.run();
@@ -127,6 +133,7 @@ extern "C" Solution *solve_cvrp_dist_mtx(
 
 extern "C" void delete_solution(Solution *sol)
 {
+	if (!sol) return;
 	for (int i = 0; i < sol->n_routes; ++i)
 		delete[] sol->routes[i].path;
 

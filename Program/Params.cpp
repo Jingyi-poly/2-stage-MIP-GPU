@@ -141,7 +141,7 @@ void checkrandom(){
 void Params::generate_scenario_demands(int n_extra_senarios){
 	generator = std::mt19937(seed);
 	n_scenarios = n_extra_senarios + 1;
-	totalDemands = new double[n_scenarios];
+	totalDemands = new double[n_scenarios]{};
 	totalDemands[0] = totalDemand;
 	std::cout<<"Generating "<<n_extra_senarios<<" extra scenarios\n";
 	int max_demand = -1;
@@ -241,7 +241,7 @@ void Params::generate_scenario_demands(int n_extra_senarios){
 void Params::generate_scenario_demands_dev(int n_extra_senarios){
 	generator = std::mt19937(seed);
 	n_scenarios = n_extra_senarios + 1;
-	totalDemands = new double[n_scenarios];
+	totalDemands = new double[n_scenarios]{};
 	totalDemands[0] = totalDemand;
 	std::cout<<"Generating "<<n_extra_senarios<<" extra scenarios\n";
 	int max_demand = -1;

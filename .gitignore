@@ -67,3 +67,8 @@ baseline/*.txt
 *.ilp
 *.sol
 *.lp
+
+# Solver and benchmark outputs
+/results/
+/pctsp/results/
+/scenarios_*.bin

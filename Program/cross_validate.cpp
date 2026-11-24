@@ -34,7 +34,7 @@ int main(int argc, char *argv[])
 	}
 	omp_set_num_threads(nthreads);
 
-	AlgorithmParameters ap;
+	AlgorithmParameters ap = default_algorithm_parameters();
 	ap.seed = seed;
 	ap.n_extra_senarios = nextra;
 

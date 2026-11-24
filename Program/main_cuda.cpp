@@ -1,4 +1,5 @@
 #include "GeneticHGS.h"
+#include "SolutionOutput.h"
 #include "commandline.h"
 #include "InstanceCVRPLIB.h"
 #include "SplitCUDA.h"
@@ -128,17 +129,13 @@ int main(int argc, char *argv[])
 			}
 		};
 
-		std::string logfile = "../anpy/logs/" + std::to_string(params.n_scenarios) + "_"
-							  + std::to_string(commandline.ap.maxClient) + ".log";
-		std::ofstream myfile(logfile);
-
 		GeneticHGS solver(params, gpuEval, gpuBatchSize, true);
-		solver.run(&myfile);
-		myfile.close();
+		solver.run();
 
 		const Individual * best = solver.getBestFound();
 		if (best)
 		{
+			writeSolution(*best, commandline.pathSolution, commandline.ap.optionalVisit);
 			std::cout << "\n===== BEST SOLUTION =====" << std::endl;
 			std::cout << "  penalizedCost: " << best->eval.penalizedCost << std::endl;
 			std::cout << "  avg distance:  " << best->eval.distance / params.n_scenarios << std::endl;
@@ -165,8 +162,8 @@ int main(int argc, char *argv[])
 			}
 		}
 	}
-	catch (const string & e) { std::cout << "EXCEPTION | " << e << std::endl; }
-	catch (const std::exception & e) { std::cout << "EXCEPTION | " << e.what() << std::endl; }
+	catch (const string & e) { std::cerr << "EXCEPTION | " << e << std::endl; return 1; }
+	catch (const std::exception & e) { std::cerr << "EXCEPTION | " << e.what() << std::endl; return 1; }
 
 	auto tAllEnd = std::chrono::steady_clock::now();
 	double totaltime = std::chrono::duration_cast<std::chrono::nanoseconds>(tAllEnd - tAllStart).count() / 1.e9;

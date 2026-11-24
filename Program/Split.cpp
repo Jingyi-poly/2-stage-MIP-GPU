@@ -1,9 +1,11 @@
-#include "Split.h" 
+#include "Split.h"
+#include <stdexcept>
 
 void Split::generalSplit(Individual & indiv, int nbMaxVehicles, int idx_scen)
 {
 	// Do not apply Split with fewer vehicles than the trivial (LP) bin packing bound
-	maxVehicles = std::max<int>(nbMaxVehicles, std::ceil(params.totalDemand/params.vehicleCapacity));
+	maxVehicles = std::min(params.nbVehicles,
+		std::max<int>(nbMaxVehicles, std::ceil(params.totalDemand/params.vehicleCapacity)));
 
 	// Initialization of the data structures for the linear split algorithms
 	// Direct application of the code located at https://github.com/vidalt/Split-Library
@@ -32,46 +34,33 @@ void Split::generalSplit(Individual & indiv, int nbMaxVehicles, int idx_scen)
 	// indiv.evaluateCompleteCost(params);
 }
 
-int Split::generateChromR_single(Individual & indiv){
-	int end = params.nbClients;
-	for (int k = params.nbVehicles - 1; k >= maxVehicles; k--)
-		indiv.chromR[k].clear();
-	for (int k = maxVehicles - 1; k >= 0; k--)
-	{
-		indiv.chromR[k].clear();
-		int begin = pred[0][end];
-		for (int ii = begin; ii < end; ii++)
-			indiv.chromR[k].push_back(indiv.chromT[ii]);
-		end = begin;
-	}
-	return end;
+int Split::generateChromR_single(Individual & indiv)
+{
+	return restoreRoutes(indiv, 0, indiv.chromR);
 }
 
-int Split::generateChromR(Individual & indiv, int idx_scen){
-	// std::cout<<"!!!!!!!!!! function    "<<idx_scen<<"\n";
-	// for (int p : pred[0]){
-	// 	std::cout<<p<<" , ";
-	// }
-	// std::cout<<"\n";
-
-	int end = params.nbClients;
-	for (int k = params.nbVehicles - 1; k >= maxVehicles; k--)
-		indiv.chromR_scen[idx_scen][k].clear();
-
-	for (int k = maxVehicles - 1; k >= 0; k--)
-	{
-		indiv.chromR_scen[idx_scen][k].clear();
-		int begin = pred[0][end];
-		for (int ii = begin; ii < end; ii++){
-			indiv.chromR_scen[idx_scen][k].push_back(indiv.chromT[ii]);
-		}
-
-		end = begin;
-	}
-	return end;
+int Split::generateChromR(Individual & indiv, int idx_scen)
+{
+	return restoreRoutes(indiv, idx_scen, indiv.chromR_scen[idx_scen]);
 }
 
+int Split::restoreRoutes(Individual & indiv, int idx_scen, std::vector<std::vector<int>>& routes)
+{
+	int end = params.nbClients;
+	for (int k = params.nbVehicles - 1; k >= 0; k--)
+	{
+		routes[k].clear();
+		if (k >= maxVehicles) continue;
+		const int begin = pred[0][end];
+		for (int i = begin; i < end; i++)
+			routes[k].push_back(indiv.chromT[i]);
+		end = begin;
+	}
 
+	if (end != 0 && !splitLFReturn(indiv, idx_scen, routes))
+		throw std::runtime_error("Unable to partition the complete tour into the given fleet.");
+	return 0;
+}
 
 int Split::splitSimple(Individual & indiv, int idx_scen)
 {
@@ -349,7 +338,8 @@ int Split::splitLF(Individual & indiv, int idx_scen)
 std::vector < std::vector <int>> Split::generalSplitReturn(Individual & indiv, int nbMaxVehicles, int idx_scen)
 {
 	// Do not apply Split with fewer vehicles than the trivial (LP) bin packing bound
-	maxVehicles = std::max<int>(nbMaxVehicles, std::ceil(params.totalDemand/params.vehicleCapacity));
+	maxVehicles = std::min(params.nbVehicles,
+		std::max<int>(nbMaxVehicles, std::ceil(params.totalDemand/params.vehicleCapacity)));
 
 	// Initialization of the data structures for the linear split algorithms
 	// Direct application of the code located at https://github.com/vidalt/Split-Library
@@ -553,15 +543,15 @@ int Split::splitLFReturn(Individual & indiv, int idx_scen, std::vector < std::ve
 
 	// Filling the chromR structure
 	for (int k = params.nbVehicles-1; k >= nbRoutes ; k--)
-		indiv.chromR_scen[idx_scen][k].clear();
+		chromR_res[k].clear();
 
 	int end = params.nbClients;
 	for (int k = nbRoutes - 1; k >= 0; k--)
 	{
-		indiv.chromR_scen[idx_scen][k].clear();
+		chromR_res[k].clear();
 		int begin = pred[k+1][end];
 		for (int ii = begin; ii < end; ii++)
-			indiv.chromR_scen[idx_scen][k].push_back(indiv.chromT[ii]);
+			chromR_res[k].push_back(indiv.chromT[ii]);
 		end = begin;
 	}
 

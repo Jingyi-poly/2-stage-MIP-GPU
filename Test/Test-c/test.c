@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include "C_Interface.h"
 #include "AlgorithmParameters.h"
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <assert.h>
 #include <stdlib.h>
 #include <math.h>

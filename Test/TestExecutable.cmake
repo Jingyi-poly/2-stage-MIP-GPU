@@ -1,20 +1,39 @@
+get_filename_component(result_dir "${SOLUTION}" DIRECTORY)
+file(MAKE_DIRECTORY "${result_dir}")
+file(REMOVE "${SOLUTION}")
 
-# delete artifacts from previous runs, if any
-file(REMOVE mySolution.sol)
-file(REMOVE mySolution.sol.PG.csv)
-
-# solve the given instance
 execute_process(
-        COMMAND ./hgs ../Instances/CVRP/${INSTANCE}.vrp mySolution.sol -seed 1 -round ${ROUND}
-        RESULTS_VARIABLE result
+    COMMAND "${SOLVER}" "${INSTANCE}" "${SOLUTION}" -seed 1 -round "${ROUND}" -nthreads 1 -iterLim 1 -log 0
+    RESULTS_VARIABLE result
 )
-message(${result})
-
-# read the result and compare with the given cost value
-file(STRINGS mySolution.sol solution)
-string(FIND "${solution}" "${COST}" cost_position)
-
-# if not match, throw an error
-if(${cost_position} EQUAL -1)
-    message(SEND_ERROR "Test error for ${INSTANCE}. Cost != ${COST}")
+if(NOT result EQUAL 0 OR NOT EXISTS "${SOLUTION}")
+    message(FATAL_ERROR "HGS failed on ${INSTANCE} with result ${result}")
 endif()
+
+file(STRINGS "${SOLUTION}" objective REGEX "^Cost[ \t]")
+if(NOT objective MATCHES "^Cost[ \t]+([0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?)$")
+    message(FATAL_ERROR "Expected a numeric objective in ${SOLUTION}, got '${objective}'")
+endif()
+set(cost "${CMAKE_MATCH_1}")
+if(cost LESS_EQUAL 0 OR cost GREATER MAX_COST)
+    message(FATAL_ERROR "Cost for ${INSTANCE}: expected (0, ${MAX_COST}], found ${cost}")
+endif()
+
+file(STRINGS "${SOLUTION}" routes REGEX "^Route #[0-9]+: ")
+set(customers)
+foreach(route IN LISTS routes)
+    string(REGEX REPLACE "^Route #[0-9]+: " "" route "${route}")
+    string(REGEX MATCHALL "[0-9]+" visited "${route}")
+    list(APPEND customers ${visited})
+endforeach()
+list(LENGTH customers count)
+list(REMOVE_DUPLICATES customers)
+list(LENGTH customers unique_count)
+if(NOT count EQUAL CLIENTS OR NOT unique_count EQUAL CLIENTS)
+    message(FATAL_ERROR "Expected ${CLIENTS} distinct customers, found ${unique_count} in ${count} visits")
+endif()
+foreach(customer IN LISTS customers)
+    if(customer LESS 1 OR customer GREATER CLIENTS)
+        message(FATAL_ERROR "Customer ${customer} is outside 1..${CLIENTS}")
+    endif()
+endforeach()

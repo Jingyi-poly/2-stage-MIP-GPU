@@ -1,168 +1,83 @@
-# GPU-Accelerated Split Algorithm for Large-Scale Stochastic CVRP
+# VRPSD and PCTSP Split solvers
 
-A GPU-accelerated Hybrid Genetic Search (HGS) solver for the Capacitated Vehicle Routing Problem with Stochastic Demands (CVRPSD). Built on top of [HGS-CVRP](https://github.com/vidalt/HGS-CVRP), this project adds CUDA-based parallel Split evaluation across scenarios and supports optional-visit (Prize-Collecting TSP) variants.
+This branch maintains the CPU and CUDA Split evaluators for vehicle routing with stochastic demands and the optional-visit prize-collecting variant. The search is based on [HGS-CVRP](https://github.com/vidalt/HGS-CVRP). For the ICLR experiments, use the [paper snapshot](https://github.com/Jingyi-poly/2-stage-MIP-GPU/tree/5ac5cb954d928bbc0407a5a9ffb1ed25ae5f14a9) and the [paper](https://arxiv.org/abs/2602.05179v3).
 
-## Features
+## CPU quick start
 
-- **CPU solver** (`hgs`) — OpenMP-parallel Split across stochastic scenarios
-- **GPU solver** (`hgs_cuda`) — CUDA-batched Split for large-scale scenario evaluation
-- **PCTSP exact solver** (`pctsp_exact`) — Gurobi-based Prize-Collecting TSP baseline (deterministic + stochastic)
-- **Python baselines** — MIP-based exact CVRP solver (`exact_baseline.py`) and PCTSP solver (`pctsp/`)
-- Optional-visit mode with configurable skip penalties
+Use CMake 3.18 or later and a C++17 compiler with OpenMP, such as GCC on Linux or WSL. CTest also uses a C compiler. Run the commands from the repository root.
 
-## Prerequisites
-
-- CMake ≥ 3.15
-- C++17 compiler with OpenMP support
-- CUDA Toolkit (tested with compute capability 7.5)
-- *(Optional)* [Gurobi](https://www.gurobi.com/) for the PCTSP exact solver
-
-## Building
-
-```bash
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+mkdir -p results
+./build/hgs Instances/CVRP/X-n106-k14.vrp results/vrpsd.sol \
+    -seed 1 -nthreads 2 -nextrascen 7 -iterLim 1
+./build/hgs Instances/CVRP/X-n106-k14.vrp results/pctsp-hgs.sol \
+    -seed 1 -nthreads 2 -nextrascen 7 -iterLim 1 -optionalVisit 1
 ```
 
-This produces three executables in `build/`:
+The solver writes nominal routes and the reported penalized objective to the specified solution file. For optional visits, the routes list selected customers only. The objective averages the nominal demand scenario and the additional generated scenarios. The solver reports run progress on standard output.
 
-| Binary        | Description                                 |
-|---------------|---------------------------------------------|
-| `hgs`         | CPU solver (OpenMP parallel)                |
-| `hgs_cuda`    | GPU solver (CUDA batched Split)             |
-| `pctsp_exact` | PCTSP exact solver (requires Gurobi)        |
+| Option | Use |
+| --- | --- |
+| `-nextrascen N` | Generate `N` additional scenarios, for `N+1` scenarios total. |
+| `-seed S`, `-nthreads T` | Set the seed and the number of CPU threads. |
+| `-iterLim I`, `-timeLim S` | Set the iteration limit or a wall-clock budget in seconds. |
+| `-maxClient C` | Limit the instance to its first `C` customers. |
+| `-optionalVisit 1`, `-skipPenScale X` | Allow customer omission and set the skip-penalty multiplier. |
 
-## Usage
+## Score a fixed visit order
 
-### CPU solver
+`cross_validate` takes a plain-text permutation of all customers in the instance. It reports the capacity-only CPU Split objective and a quadratic reference on the same seeded scenarios.
 
-```bash
-./hgs <instance.vrp> <solution.sol> [options]
+```sh
+./build/cross_validate Instances/CVRP/X-n106-k14.vrp \
+    Instances/CVRP/X-n106-k14.vrp.cvrp_chromT.txt -seed 1 -nextrascen 7 -nthreads 2
 ```
 
-### GPU solver
+## Optional CUDA build
 
-```bash
-./hgs_cuda <instance.vrp> <solution.sol> [options]
+Install a CUDA toolkit and a compatible NVIDIA driver. Supply the CUDA architecture for your GPU. The example uses compute capability 7.5.
+
+```sh
+cmake -S . -B build_cuda -DCMAKE_BUILD_TYPE=Release -DENABLE_CUDA=ON \
+    -DCMAKE_CUDA_ARCHITECTURES=75
+cmake --build build_cuda --parallel
+ctest --test-dir build_cuda --output-on-failure
+mkdir -p results
+./build_cuda/hgs_cuda Instances/CVRP/X-n106-k14.vrp results/vrpsd-cuda.sol \
+    -seed 1 -nthreads 2 -nextrascen 7 -iterLim 1 -gpuBatchSize 1
 ```
 
-### Examples
+CTest checks the CPU and CUDA objectives on the same fixed tour and eight scenarios. This check passed with GCC 13 and CUDA 12.6 on an RTX 2080 Ti. Use `-DCMAKE_CUDA_COMPILER=/path/to/nvcc` when the toolkit is installed outside the usual search paths.
 
-```bash
-# Quick CPU run (8 threads, 5000 scenarios, 30s time limit)
-./hgs ../Instances/CVRP/X-n106-k14.vrp sol.sol -seed 1 -t 30 -nthreads 8 -nextrascen 4999
+## Optional Gurobi baselines
 
-# GPU run with optional-visit mode
-./hgs_cuda ../Instances/CVRP/X-n106-k14.vrp sol.sol -seed 1 -t 300 \
-    -nextrascen 99999 -iterLim 100 -optionalVisit 1
+Set `GUROBI_HOME` to the Gurobi SDK directory containing `include/` and `lib/`. The binaries require a license at runtime and print their results to standard output.
 
-# PCTSP exact baseline
-./pctsp_exact ../Instances/CVRP/X-n106-k14.vrp sol.sol -seed 1 \
-    -nextrascen 99 -timeLim 600
+```sh
+cmake -S . -B build_gurobi -DCMAKE_BUILD_TYPE=Release -DENABLE_GUROBI=ON \
+    -DGUROBI_HOME="$GUROBI_HOME"
+cmake --build build_gurobi --parallel
+mkdir -p results
+./build_gurobi/pctsp_exact Instances/CVRP/X-n106-k14.vrp results/gurobi.sol \
+    -seed 1 -nthreads 1 -maxClient 6 -nextrascen 7 -timeLim 25 -optionalVisit 0
 ```
 
-### Command-Line Options
+| Executable | Mode |
+| --- | --- |
+| `pctsp_exact` | With `-optionalVisit 0`, solves the all-visit stochastic MILP. With `-optionalVisit 1`, solves a deterministic optional-visit model, then improves it with stochastic local search. |
+| `pctsp_exact_cuda` | Built when both options are enabled. Uses GPU Split in the all-visit Benders path. |
+| `cvrp_exact` | Separate two-stage CVRP Gurobi baseline in `pctsp_exact/`. Configure it with `cmake -S pctsp_exact -B build_cvrp_exact -DGUROBI_HOME="$GUROBI_HOME"` and build that directory. |
 
-**Core:**
+The Gurobi targets build with Gurobi 12.0.1. The runtime check requires a configured license.
 
-| Option              | Type     | Default   | Description                                      |
-|---------------------|----------|-----------|--------------------------------------------------|
-| `-t`                | double   | 0 (off)   | Time limit in seconds (iterative restarts)       |
-| `-it`               | int      | 20000     | Max iterations without improvement               |
-| `-iterLim`          | int      | —         | Hard iteration limit                             |
-| `-timeLim`          | int      | —         | Wall-clock time limit (seconds)                  |
-| `-seed`             | int      | 0         | Random seed                                      |
-| `-veh`              | int      | auto      | Prescribed fleet size                            |
-| `-round`            | bool     | 1         | Round distances to nearest integer               |
-| `-log`              | bool     | 1         | Verbose output                                   |
-| `-nthreads`         | int      | 1         | OpenMP thread count                              |
+## Benchmarks and project files
 
-**Stochastic / scenario:**
+- `Program/` contains the split operators and solver entry points. `Test/` contains CTest checks.
+- `Instances/CVRP/` contains benchmark inputs and fixed permutations used for scoring. `pctsp/` contains the Python PCTSP baselines and their input instances. `baseline/` and `exact_baseline.py` provide additional CVRP baseline tools.
+- `scripts/bench_split.sh BASELINE_GPU OPTIMIZED_GPU [REPEATS] [OUTPUT_DIR]` runs matching seeded, single-candidate CUDA timings and saves the per-run logs and CSV. The baseline is [d29b135](https://github.com/Jingyi-poly/2-stage-MIP-GPU/tree/d29b135fe95f27ca61e2454c926ec2aa275f036b), immediately before the batched optimization. Pass each revision's `hgs_cuda` executable path.
+- The [original development snapshot](https://github.com/Jingyi-poly/2-stage-MIP-GPU/tree/8f7f7cd5ba6881ad11c9739ac3c7f71e18541fef) preserves earlier analysis scripts, figures, and outputs. Keep new runs in `results/` and local build directories.
 
-| Option              | Type     | Default   | Description                                      |
-|---------------------|----------|-----------|--------------------------------------------------|
-| `-nextrascen`       | int      | 0         | Number of extra demand scenarios to generate     |
-| `-gpuBatchSize`     | int      | —         | Batch size for GPU evaluation                    |
-| `-deviceId`         | int      | 0         | CUDA device ID                                   |
-| `-exportScenarios`  | int      | 0         | Export scenarios to binary file                  |
-
-**Optional-visit / PCTSP:**
-
-| Option              | Type     | Default   | Description                                      |
-|---------------------|----------|-----------|--------------------------------------------------|
-| `-optionalVisit`    | int      | 0         | Enable optional-visit mode                       |
-| `-skipPenScale`     | double   | —         | Scale factor for skip penalties                  |
-| `-maxClient`        | int      | —         | Max client count                                 |
-
-**GA tuning:**
-
-| Option                      | Type     | Default | Description                                    |
-|-----------------------------|----------|---------|------------------------------------------------|
-| `-mu`                       | int      | 25      | Minimum population size                        |
-| `-lambda`                   | int      | 40      | Generation size                                |
-| `-nbElite`                  | int      | 5       | Number of elite individuals                    |
-| `-nbClose`                  | int      | 4       | Neighbors for diversity contribution           |
-| `-nbGranular`               | int      | 20      | Granular search parameter                      |
-| `-nbIterPenaltyManagement`  | int      | 100     | Iterations between penalty updates             |
-| `-targetFeasible`           | double   | 0.2     | Target feasible ratio                          |
-| `-penaltyIncrease`          | double   | 1.2     | Penalty increase multiplier                    |
-| `-penaltyDecrease`          | double   | 0.85    | Penalty decrease multiplier                    |
-| `-freqPrint`                | int      | —       | Print frequency                                |
-| `-nbIterTraces`             | int      | 500     | Iterations between trace display               |
-
-## Project Structure
-
-```
-Program/              Core C++/CUDA source code
-  main2.cpp           CPU solver entry point
-  main_cuda.cpp       GPU solver entry point
-  main_pctsp.cpp      PCTSP exact solver entry point
-  Split.cpp/h         CPU Split algorithm
-  SplitCUDA.cu/h      CUDA Split algorithm
-  GeneticHGS.cpp/h    HGS genetic algorithm driver
-  Genetic.cpp/h       Original HGS genetic algorithm
-  LocalSearch.cpp/h   Local search with SWAP* neighborhood
-  Individual.cpp/h    Solution representation
-  Population.cpp/h    Population management
-  Params.cpp/h        Problem data and parameters
-  PCTSPExact.cpp/h    Gurobi-based PCTSP solver
-  InstanceCVRPLIB.*   CVRPLIB instance parser
-  AlgorithmParameters.* Algorithm parameter definitions
-  C_Interface.*       C API wrapper
-Instances/CVRP/       Benchmark instances (CMT, Golden, Uchoa X)
-Test/                 CTest integration tests
-baseline/             MIP baseline scripts
-exact_baseline.py     Exact CVRP solver (PuLP + CBC)
-pctsp/                Python PCTSP solver and analysis
-  src/                Gurobi-based PCTSP solver modules
-  data/               PCTSP benchmark instances
-anpy/                 Analysis and plotting scripts
-```
-
-## Output Format
-
-Progress is displayed as:
-
-```
-It [N1] [N2] | T(s) [T] | Feas [NF] [BestF] [AvgF] | Inf [NI] [BestI] [AvgI] | Div [DivF] [DivI] | Feas [FeasC] [FeasD] | Pen [PenC] [PenD]
-```
-
-- `N1`, `N2` — Total iterations / iterations without improvement
-- `T` — Elapsed CPU time
-- `NF`, `NI` — Feasible / infeasible subpopulation sizes
-- `BestF`, `BestI` — Best feasible / infeasible solution values
-- `DivF`, `DivI` — Subpopulation diversity
-- `FeasC`, `FeasD` — Naturally feasible ratio (capacity / duration)
-- `PenC`, `PenD` — Current penalty levels
-
-## References
-
-[1] Vidal, T., Crainic, T. G., Gendreau, M., Lahrichi, N., Rei, W. (2012).
-A hybrid genetic algorithm for multidepot and periodic vehicle routing problems. *Operations Research*, 60(3), 611-624.
-
-[2] Vidal, T. (2022). Hybrid genetic search for the CVRP: Open-source implementation and SWAP* neighborhood. *Computers & Operations Research*, 140, 105643.
-
-## License
-
-[MIT](LICENSE) — Copyright (c) 2020 Thibaut Vidal
+See [LICENSE](LICENSE) for the HGS-CVRP MIT notice.
