@@ -1,0 +1,11 @@
+/build*/
+/results/
+/parallel_logs/
+/irp
+__pycache__/
+*.pyc
+*.o
+*.log
+.DS_Store
+/rpc/irp_pb2.py
+/rpc/irp_pb2_grpc.py

@@ -1,3 +1,4 @@
+#include <filesystem>
 #include "commandline.h"
 
 void commandline::set_instance_name(string to_parse)
@@ -11,40 +12,30 @@ void commandline::set_BKS_name(string to_parse) { BKS_name = to_parse; }
 
 void commandline::set_default_sorties_name(string to_parse)
 {
-  char caractere1 = '/';
-  char caractere2 = '\\';
-  int position = (int)to_parse.find_last_of(caractere1);
-  int position2 = (int)to_parse.find_last_of(caractere2);
-  if (position2 > position)
-    position = position2;
-
-  if (position != -1)
-  {
-    string directory = to_parse.substr(0, position + 1) + "tradeoff/";
-    string filename = to_parse.substr(position + 1, to_parse.length() - position - 1-4);
-
-    sortie_name = directory + "STsol-" + filename+ "_veh-" + std::to_string(nbVeh) + "_rou-" + std::to_string(rou) + "_seed-" + std::to_string(seed) + "_demandseed-" + std::to_string(demand_seed) + "_scenario-" + std::to_string(nb_scenario);
-    BKS_name = directory + "STbks-" + filename+ "_veh-" + std::to_string(nbVeh) + "_rou-" + std::to_string(rou) + "_scenario-" + std::to_string(nb_scenario);
+  const std::filesystem::path path(to_parse);
+  std::filesystem::path directory("results");
+  const auto parent = path.parent_path().filename();
+  if (!parent.empty() && parent != "." && parent != "..") {
+    directory /= parent;
   }
-  else
-  {
-    sortie_name = to_parse.substr(0, position + 1) + "STsol-" +
-                  to_parse.substr(position + 1, to_parse.length() - 1) +"-seed-"+to_parse.substr(seed)+"-veh-"+to_parse.substr(nbVeh)+"-rou-"+to_parse.substr(rou)+"-scenario-"+to_parse.substr(nb_scenario);
-    BKS_name = "STbks-" + to_parse;
+
+  const string run = path.stem().string() + "_veh-" + std::to_string(nbVeh)
+      + "_rou-" + std::to_string(rou);
+  const string scenarios = "_scenario-" + std::to_string(nb_scenario);
+
+  if (sortie_name.empty()) {
+    sortie_name = (directory / ("STsol-" + run + "_seed-" + std::to_string(seed)
+        + "_demandseed-" + std::to_string(demand_seed) + scenarios)).string();
+  }
+  if (BKS_name.empty()) {
+    BKS_name = (directory / ("STbks-" + run + scenarios)).string();
   }
 }
 
 // constructeur
 commandline::commandline(int argc, char *argv[])
 {
-  bool isTime = false;
-  bool isOutput = false;
-  bool isBKS = false;
-
-  cout << argc << endl;
-  cout << string(argv[0]) << endl;
-
-  if (argc % 2 != 0 || argc > 24 || argc < 2)
+  if (argc % 2 != 0 || argc < 2)
   {
     cout << "incorrect command line" << endl;
     command_ok = false;
@@ -62,11 +53,11 @@ commandline::commandline(int argc, char *argv[])
     relax = -1; // unknown
     rou = -1;
     stockout = false;
-    nb_scenario = 0;
+    nb_scenario = 1;
     demand_seed = 0;
     iter = 0;
     control_day_1 = 0;
-    num_threads = 0;  // 0表示使用默认值(hardware_concurrency)
+    num_threads = -1;  // CPU hardware concurrency unless explicitly selected.
     // afficher le lancement du programme :
     // for ( int i = 0 ; i < argc ; i ++ )
     // cout << string(argv[i]) << " " ;
@@ -109,7 +100,14 @@ commandline::commandline(int argc, char *argv[])
       {
         cout << "Commande non reconnue : " << string(argv[i]) << endl;
         command_ok = false;
+        return;
       }
+    }
+    if (nb_scenario < 1)
+    {
+      std::cerr << "-scenario must be positive." << std::endl;
+      command_ok = false;
+      return;
     }
     set_default_sorties_name(string(argv[1]));
     command_ok = true;
@@ -118,12 +116,9 @@ commandline::commandline(int argc, char *argv[])
 
 void commandline::set_debug_prams(string instance)
 {
-  bool isTime = false;
-  bool isOutput = false;
-  bool isBKS = false;
-
   set_instance_name(instance);
-  set_default_sorties_name(instance);
+  sortie_name.clear();
+  BKS_name.clear();
 
   cpu_time = 1200;
   seed = 1000;
@@ -131,6 +126,14 @@ void commandline::set_debug_prams(string instance)
   nbCli = -1; // unknown
   nbVeh = 2;  // unknown
   relax = -1; // unknown
+  rou = -1;
+  stockout = false;
+  nb_scenario = 1;
+  demand_seed = 0;
+  iter = 0;
+  control_day_1 = 0;
+  num_threads = -1;
+  set_default_sorties_name(instance);
 
   command_ok = true;
 }

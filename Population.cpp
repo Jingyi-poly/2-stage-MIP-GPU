@@ -541,7 +541,10 @@ void Population::ExportPop(string nomFichier,bool add)
 			cout.precision(10);
 			ofstream myfile;
 			if (add) myfile.open(nomFichier.data(), std::ios::app);//add on previous
-			else myfile.open(nomFichier.data()); // 
+			else myfile.open(nomFichier.data());
+			if (!myfile) {
+				throw std::runtime_error("Cannot write solution file: " + nomFichier);
+			}
 
 			if (s == 0) {
 				myfile << "Total Cost: " << trainer->coutSol.evaluation << endl;

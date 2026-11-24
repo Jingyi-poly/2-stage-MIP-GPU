@@ -1,39 +1,11 @@
-cmake_minimum_required(VERSION 3.10)
-project(irp CXX)
+cmake_minimum_required(VERSION 3.16)
+project(irp LANGUAGES CXX)
 
-# 设置可执行文件输出到项目根目录
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
+option(IRP_ENABLE_GRPC "Enable the gRPC client for the GPU evaluator" OFF)
 
-# 设置 C++ 标准
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS ON)
+find_package(Threads REQUIRED)
 
-# 查找依赖包
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(GRPC REQUIRED grpc++ grpc protobuf)
-
-# 设置编译选项
-add_compile_options(
-    -g
-    -m64
-    -O
-    -fPIC
-    -fno-strict-aliasing
-    -fexceptions
-    -DNDEBUG
-    -DIL_STD
-)
-
-# 包含目录
-include_directories(
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${GRPC_INCLUDE_DIRS}
-    ${CMAKE_CURRENT_SOURCE_DIR}/rpc
-)
-
-# 源文件列表
-set(SOURCES
+add_executable(irp
     Client.cpp
     Vehicle.cpp
     commandline.cpp
@@ -54,25 +26,56 @@ set(SOURCES
     OUPolicySolver.cpp
     ThreadPool.cpp
     ScenarioUtils.cpp
-    rpc/irp.pb.cc
-    rpc/irp.grpc.pb.cc
 )
-
-# 创建可执行文件
-add_executable(irp ${SOURCES})
-
-# 链接库
-target_link_libraries(irp
-    PRIVATE
-    m
-    pthread
-    dl
-    ${GRPC_LDFLAGS}
+target_compile_features(irp PRIVATE cxx_std_17)
+target_compile_definitions(irp PRIVATE IL_STD)
+target_compile_options(irp PRIVATE
+    "$<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-fno-strict-aliasing>"
 )
+target_link_libraries(irp PRIVATE Threads::Threads)
 
-# 添加清理目标
-add_custom_target(clean_all
-    COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}
-    COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_SOURCE_DIR}/irp
-    COMMENT "完全清理构建文件和可执行文件"
-)
+if(IRP_ENABLE_GRPC)
+    find_package(Protobuf REQUIRED)
+    find_package(gRPC CONFIG REQUIRED)
+
+    set(proto_dir "${CMAKE_CURRENT_SOURCE_DIR}/rpc")
+    set(proto_file "${proto_dir}/irp.proto")
+    set(generated_dir "${CMAKE_CURRENT_BINARY_DIR}/rpc")
+    set(generated_files
+        "${generated_dir}/irp.pb.cc"
+        "${generated_dir}/irp.pb.h"
+        "${generated_dir}/irp.grpc.pb.cc"
+        "${generated_dir}/irp.grpc.pb.h"
+    )
+    add_custom_command(
+        OUTPUT ${generated_files}
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${generated_dir}"
+        COMMAND protobuf::protoc
+        ARGS "--proto_path=${proto_dir}"
+             "--cpp_out=${generated_dir}"
+             "--grpc_out=${generated_dir}"
+             "--plugin=protoc-gen-grpc=$<TARGET_FILE:gRPC::grpc_cpp_plugin>"
+             "${proto_file}"
+        DEPENDS "${proto_file}" protobuf::protoc gRPC::grpc_cpp_plugin
+        VERBATIM
+    )
+    target_sources(irp PRIVATE ${generated_files})
+    target_include_directories(irp PRIVATE "${generated_dir}")
+    target_compile_definitions(irp PRIVATE IRP_ENABLE_GRPC)
+    target_link_libraries(irp PRIVATE gRPC::grpc++ protobuf::libprotobuf)
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    foreach(scenarios IN ITEMS 1 2)
+        add_test(NAME dsirp_cpu_${scenarios}_scenario
+            COMMAND "${CMAKE_COMMAND}"
+                "-DIRP=$<TARGET_FILE:irp>"
+                "-DINSTANCE=${CMAKE_CURRENT_SOURCE_DIR}/Data/Small/Istanze0105h3/0.dat"
+                "-DSCENARIOS=${scenarios}"
+                "-DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/results/smoke-${scenarios}.sol"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpu_smoke.cmake"
+        )
+        set_tests_properties(dsirp_cpu_${scenarios}_scenario PROPERTIES TIMEOUT 90)
+    endforeach()
+endif()

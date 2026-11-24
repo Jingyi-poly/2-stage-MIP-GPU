@@ -1,3 +1,6 @@
+#include <filesystem>
+#include <algorithm>
+#include "ScenarioUtils.h"
 /*                       Algorithme - HGSADC                         */
 /*                    Propri�t� de Thibaut VIDAL                     */
 /*                    thibaut.vidal@cirrelt.ca                       */
@@ -1715,35 +1718,44 @@ int mainTest4(int argc, char *argv[])
 
 int main(int argc, char *argv[])
 {
-  // 解析命令行参数以获取线程数
   commandline c(argc, argv);
-
-  // 确定使用的线程数
-  size_t num_threads;
+  if (!c.is_valid()) {
+    std::cerr << "Usage: irp INSTANCE [-type 38] [-veh N] [-stock COST]"
+              << " [-scenario N] [-threads N] [-sol PATH] [-bks PATH]"
+              << " [-seed N] [-demandseed N] [-iter N]\n";
+    return 2;
+  }
+#ifndef IRP_ENABLE_GRPC
   if (c.get_num_threads() == 0) {
-    // 线程数为0时，不初始化线程池，强制使用gRPC模式
-    std::cout << "Threading disabled (threads=0) - using gRPC-only mode" << std::endl;
-    g_thread_pool = nullptr;  // 确保线程池为空，触发顺序执行模式
-  } else if (c.get_num_threads() > 0) {
-    num_threads = c.get_num_threads();
-    std::cout << "Using user-specified " << num_threads << " threads" << std::endl;
-    // 初始化线程池，使用指定的线程数
-    initThreadPool(num_threads);
-  } else {
-    num_threads = std::thread::hardware_concurrency();
-    std::cout << "Using default " << num_threads << " threads (hardware concurrency)" << std::endl;
-    // 初始化线程池，使用指定的线程数
-    initThreadPool(num_threads);
+    std::cerr << "-threads 0 requires an IRP_ENABLE_GRPC build and a running gRPC server.\n";
+    return 2;
   }
-  
-  //  mainTest4(argc, argv);
-  //  mainTest3(argc, argv);
+#endif
 
-  // 传递已解析的commandline对象给mainIRP
-  mainIRP(c);
-  
-  // 清理线程池（仅在已初始化时）
-  if (c.get_num_threads() != 0) {
+  try {
+    const auto solution_dir = std::filesystem::path(c.get_path_to_solution()).parent_path();
+    if (!solution_dir.empty()) {
+      std::filesystem::create_directories(solution_dir);
+    }
+    g_log_file_path = c.get_path_to_solution() + ".timing.log";
+
+    if (c.get_num_threads() == 0) {
+      std::cout << "Using gRPC evaluator (threads=0)" << std::endl;
+    } else {
+      const size_t num_threads = c.get_num_threads() < 0
+          ? std::max(1u, std::thread::hardware_concurrency())
+          : static_cast<size_t>(c.get_num_threads());
+      initThreadPool(num_threads);
+    }
+
+    const int result = mainIRP(c);
     destroyThreadPool();
+    return result;
+  } catch (const std::exception& error) {
+    std::cerr << "IRP: " << error.what() << '\n';
+  } catch (const std::string& error) {
+    std::cerr << "IRP: " << error << '\n';
   }
+  destroyThreadPool();
+  return 1;
 }

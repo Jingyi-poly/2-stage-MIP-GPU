@@ -3,16 +3,14 @@
 #include <thread>
 
 // gRPC相关头文件
+#ifdef IRP_ENABLE_GRPC
 #include <grpcpp/grpcpp.h>
-#include "rpc/irp.grpc.pb.h"
+#include "irp.grpc.pb.h"
+#endif
 
 #include <random> // 新增
 #include "ScenarioUtils.h" // 添加日志统计功能
 
-using grpc::Channel;
-using grpc::ClientContext;
-using grpc::Status;
-using irp::IrpService;
 // 移除冲突的using声明，直接使用完整命名空间
 
 bool g_trace = false;
@@ -1335,12 +1333,14 @@ void Individu::RunSearchPi(int rep_times) {
 	}
 
 	// 检查是否使用gRPC模式 (threads=0时，g_thread_pool为nullptr)
+#ifdef IRP_ENABLE_GRPC
 	if (g_thread_pool == nullptr) {
 		if (traces) std::cout << "Using gRPC mode for Pi search" << std::endl;
 		RunSearchPi_gRPC(rep_times);
 		logFunctionEnd("Individu::RunSearchPi", start_time);
 		return;
 	}
+#endif
 
 	// 使用本地计算模式 (threads>0)
 	if (traces) std::cout << "Using local computation mode for Pi search" << std::endl;
@@ -1362,6 +1362,7 @@ void Individu::RunSearchPi_Local(int rep_times) {
 	if (traces) std::cout << "RunSearchPi_Local: completed local search" << std::endl;
 }
 
+#ifdef IRP_ENABLE_GRPC
 void Individu::RunSearchPi_gRPC(int rep_times) {
 	// gRPC计算模式：使用远程服务器计算
 	bool traces = false;
@@ -1519,6 +1520,8 @@ void Individu::RunSearchPi_gRPC(int rep_times) {
 	// 	RunSearchPi_gRPC(rep_times + 1);
 	// }
 }
+
+#endif
 
 void Individu::UpdatePenalty()
 {

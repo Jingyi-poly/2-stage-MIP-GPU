@@ -227,7 +227,9 @@ class Individu
 
   void RunSearchPi(int rep_times);
   void RunSearchPi_Local(int rep_times);
+#ifdef IRP_ENABLE_GRPC
   void RunSearchPi_gRPC(int rep_times);
+#endif
   //destructeur
   //析构函数。这通常用于释放对象在其生命周期中分配的任何资源。
   ~Individu();
