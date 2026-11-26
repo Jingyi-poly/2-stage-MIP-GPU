@@ -1,4 +1,5 @@
 #include "Params.h"
+#include "ScenarioDemandSampler.h"
 
 // The universal constructor for both executable and shared library
 // When the executable is run from the commandline,
@@ -30,9 +31,18 @@ Params::Params(
 	totalDemand = 0.;
 	maxDemand = 0.;
 
-	// Initialize RNG
-	// ran.seed(ap.seed);
-	seed = ap.seed;
+	// Keep -seed as the backward-compatible fallback while allowing experiment
+	// runners to vary the scenario sample and the HGS trajectory independently.
+	const int resolvedScenarioSeed =
+		ap.scenarioSeed >= 0 ? ap.scenarioSeed : ap.seed;
+	const int resolvedPenaltySeed =
+		ap.penaltySeed >= 0 ? ap.penaltySeed : resolvedScenarioSeed;
+	const int resolvedAlgoSeed = ap.algoSeed >= 0 ? ap.algoSeed : ap.seed;
+	this->ap.scenarioSeed = resolvedScenarioSeed;
+	this->ap.penaltySeed = resolvedPenaltySeed;
+	this->ap.algoSeed = resolvedAlgoSeed;
+	seed = resolvedScenarioSeed;
+	ran.seed(static_cast<std::minstd_rand::result_type>(resolvedAlgoSeed));
 	
 
 	// check if valid coordinates are provided
@@ -126,6 +136,11 @@ Params::Params(
 		std::cout << "----- INSTANCE SUCCESSFULLY LOADED WITH " << nbClients << " CLIENTS AND " << nbVehicles << " VEHICLES" << std::endl;
 }
 
+Params::~Params()
+{
+	delete[] totalDemands;
+}
+
 void checkrandom(){
 	std::mt19937 generator;
 	generator = std::mt19937(14);
@@ -139,79 +154,90 @@ void checkrandom(){
 
 
 void Params::generate_scenario_demands(int n_extra_senarios){
+	if (n_extra_senarios < 0)
+		throw std::invalid_argument("Number of extra scenarios cannot be negative");
+	validate_scenario_demand_parameters(ap);
+
 	generator = std::mt19937(seed);
 	n_scenarios = n_extra_senarios + 1;
-	totalDemands = new double[n_scenarios]{};
-	totalDemands[0] = totalDemand;
-	std::cout<<"Generating "<<n_extra_senarios<<" extra scenarios\n";
-	int max_demand = -1;
-	int min_demand = 1e+8;
-	int avg = 0;
-	std::vector< double > current_demands_sum(n_scenarios,nbVehicles * vehicleCapacity);
-	std::cout<<"Max cap/veh "<<vehicleCapacity<<"  with "<<nbVehicles<<"cars\n";
-
+	delete[] totalDemands;
+	totalDemands = new double[n_scenarios]();
+	skipPenaltiesGenerated = false;
 	for (auto & client : cli) {
-		// std::cout<<"Client with demand: "<<client.demand<<"\n";
-		if (max_demand < client.demand){
-			max_demand = client.demand;
-		}
-		if (min_demand > client.demand){
-			min_demand = client.demand;
-		}
-		avg += client.demand;
-		client.demands_scenarios.push_back(client.demand);
+		client.demands_scenarios.clear();
+		client.demands_scenarios.reserve(n_scenarios);
+		client.skipPenalty = 0.0;
 	}
-	avg = avg / cli.size();
-	if (min_demand <= 0){
-		min_demand = 1.0;
-	}
-	std::cout<<"Max "<<max_demand<<"\nMin "<<min_demand<<"\n";
-	int elap = (max_demand - min_demand);
+	const char * distributionName =
+		scenario_demand_distribution_name(ap.demandDistribution);
+	std::cout << "Generating " << n_scenarios << " scenarios"
+			  << " with demand_distribution=" << distributionName << '\n';
+	std::cout << "DEMAND_DISTRIBUTION name=" << distributionName
+			  << " includes_nominal="
+			  << (ap.demandDistribution == SCENARIO_DEMAND_LEGACY_MIXTURE ? 1 : 0)
+		  << " seed=" << seed << " scenarios=" << n_scenarios << '\n';
+	std::cout << "DEMAND_PARAMETERS version=multiseed-20260914 cv=" << ap.demandCV
+		<< " uniform_span=" << ap.demandUniformSpan << " stress_prob=" << ap.demandStressProb
+		<< " stress_scale=" << ap.demandStressScale << " common_event_weight=" << ap.demandCorrelation << '\n';
 
-	// std::uniform_int_distribution<int> distribution(min_demand, max_demand);
-	// std::uniform_int_distribution<int> distribution(vehicleCapacity/3, vehicleCapacity);
-	// std::uniform_int_distribution<int> distribution(1, vehicleCapacity/4);
-	// std::uniform_int_distribution<int> distribution(vehicleCapacity*0.2, vehicleCapacity/2);
-	std::uniform_int_distribution<int> distribution(1, avg);
-	std::uniform_int_distribution<int> distribution2(1, avg);
-
-	int remain_client = cli.size();
-	// for (auto & client : cli) {
-	// 	remain_client -= 1;
-	// 	client.demands_scenarios.push_back(client.demand);
-	// 	for (int i = 0; i < n_extra_senarios; ++i){
-	for (int i = 0; i < n_extra_senarios; ++i){
-		int client_counter = 0;
-		for (auto & client : cli) {
-			// int randomNum = (rand() % elap) + min_demand;
-			int randomNum = distribution(generator);
-			if (i % 10 == 0){
-				randomNum += distribution2(generator);
+	if (ap.demandDistribution == SCENARIO_DEMAND_LEGACY_MIXTURE)
+	{
+		// Backward-compatible generator: one nominal row followed by the old
+		// 90/10 uniform/triangular mixture based on the global client average.
+		totalDemands[0] = totalDemand;
+		int averageDemand = 0;
+		for (auto & client : cli)
+		{
+			averageDemand += static_cast<int>(client.demand);
+			client.demands_scenarios.push_back(client.demand);
+		}
+		averageDemand = std::max(
+			1, averageDemand / std::max<int>(1, static_cast<int>(cli.size()) - 1));
+		std::uniform_int_distribution<int> regularDemand(1, averageDemand);
+		std::uniform_int_distribution<int> extraStressDemand(1, averageDemand);
+		for (int scenario = 0; scenario < n_extra_senarios; ++scenario)
+		{
+			for (int client = 0; client <= nbClients; ++client)
+			{
+				int demand = regularDemand(generator);
+				if (scenario % 10 == 0)
+					demand += extraStressDemand(generator);
+				if (client == 0)
+					demand = static_cast<int>(cli[client].demand);
+				cli[client].demands_scenarios.push_back(demand);
+				totalDemands[scenario + 1] += demand;
 			}
-			if (client_counter == 0){
-				randomNum = client.demand;
-			}
-			// randomNum = vehicleCapacity/1.3;
-			// if (current_demands_sum[i] - randomNum < remain_client){
-			// 	randomNum = current_demands_sum[i] - remain_client;
-			// }
-			// if (cli.size() - remain_client <3  && i == 2){
+		}
+	}
+	else
+	{
+		// Both paper-facing models are centered on each client's nominal demand.
+		// Every row is random, including row zero, so N and N+1 runs with the
+		// same seed are strict prefixes without a special nominal observation.
+		ScenarioDemandSampler sampler(ap, generator);
 
-			// std::cout<<"Client "<<cli.size() - remain_client<<" at Scenario "<<i<<"   load: "<<randomNum<<"  remain cap "<<current_demands_sum[i]<<"\n";
-			// }
-			// std::cout<<"Client "<<cli.size() - remain_client<<" at Scenario "<<i<<"   load: "<<randomNum<<"  remain cap "<<current_demands_sum[i]<<"\n";
-			current_demands_sum[i] -= randomNum;
-			client.demands_scenarios.push_back(randomNum);
-			// std::cout<<"    after load remain cap "<<client.demands_scenarios[i]<<"\n";
-			totalDemands[i+1] += randomNum;
-			client_counter += 1;
+		for (int scenario = 0; scenario < n_scenarios; ++scenario)
+		{
+			sampler.beginScenario();
+			cli[0].demands_scenarios.push_back(0.0);
+			for (int client = 1; client <= nbClients; ++client)
+			{
+				const int demand = sampler.sample(cli[client].demand);
+				cli[client].demands_scenarios.push_back(demand);
+				totalDemands[scenario] += demand;
+			}
 		}
 	}
 
+	// Generate optional-visit penalties before exporting so the binary file and
+	// the in-memory problem solved by HGS contain exactly the same data.
+	generate_skip_penalties();
 	if (ap.exportScenarios){
 		std::string logfile = "scenarios_" + std::to_string(n_scenarios)
 							  + "_" + std::to_string(nbClients) + ".bin";
 		std::ofstream out(logfile, std::ios::binary);
+		if (!out)
+			throw std::runtime_error("Cannot open scenario export file: " + logfile);
 		int nc = nbClients;
 		int ns = n_scenarios;
 		out.write(reinterpret_cast<char*>(&nc), sizeof(int));
@@ -239,10 +265,19 @@ void Params::generate_scenario_demands(int n_extra_senarios){
 
 
 void Params::generate_scenario_demands_dev(int n_extra_senarios){
+	if (n_extra_senarios < 0)
+		throw std::invalid_argument("Number of extra scenarios cannot be negative");
 	generator = std::mt19937(seed);
 	n_scenarios = n_extra_senarios + 1;
-	totalDemands = new double[n_scenarios]{};
+	delete[] totalDemands;
+	totalDemands = new double[n_scenarios]();
 	totalDemands[0] = totalDemand;
+	skipPenaltiesGenerated = false;
+	for (auto & client : cli) {
+		client.demands_scenarios.clear();
+		client.skipPenalty = 0.0;
+		client.demands_scenarios.push_back(client.demand);
+	}
 	std::cout<<"Generating "<<n_extra_senarios<<" extra scenarios\n";
 	int max_demand = -1;
 	int min_demand = 1e+8;
@@ -309,19 +344,25 @@ void Params::generate_scenario_demands_dev(int n_extra_senarios){
 	}
 
 
+	generate_skip_penalties();
 	checkrandom();
 }
 
 void Params::generate_skip_penalties()
 {
 	if (!ap.optionalVisit) return;
+	if (skipPenaltiesGenerated) return;
+	// Penalties define the first-stage problem, so their RNG must not depend on
+	// how many demand scenarios were generated (or on their generation order).
+	std::mt19937 penaltyGenerator(static_cast<std::mt19937::result_type>(ap.penaltySeed));
 	cli[0].skipPenalty = 0.0;
 	for (int i = 1; i <= nbClients; i++)
 	{
 		double basePen = timeCost[0][i] * ap.skipPenScale;
 		std::uniform_real_distribution<double> dist(0.5 * basePen, 1.5 * basePen);
-		cli[i].skipPenalty = dist(generator);
+		cli[i].skipPenalty = dist(penaltyGenerator);
 	}
+	skipPenaltiesGenerated = true;
 	if (verbose)
 		std::cout << "----- GENERATED SKIP PENALTIES (scale=" << ap.skipPenScale << ")" << std::endl;
 }

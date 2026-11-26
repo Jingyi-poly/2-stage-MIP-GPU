@@ -3,10 +3,11 @@
 #include <algorithm>
 #include <numeric>
 #include <cmath>
+#include <iomanip>
 
 GeneticHGS::GeneticHGS(Params & params, EvalFunc evaluator, int batchSize, bool gpuMode)
 	: params(params), evaluator(std::move(evaluator)), batchSize(batchSize), gpuMode(gpuMode),
-	  localSearch(params), splitLS(params), bestSolution(params)
+	  localSearch(params), splitLS(params), bestSolution(params, gpuMode)
 {
 	bestSolution.eval.penalizedCost = 1.e30;
 }
@@ -20,6 +21,7 @@ GeneticHGS::~GeneticHGS()
 void GeneticHGS::evaluateBatch(std::vector<Individual*>& batch)
 {
 	evaluator(batch);
+	evaluatedTours += static_cast<std::uint64_t>(batch.size());
 }
 
 void GeneticHGS::evaluateIndividual(Individual & indiv)
@@ -301,12 +303,26 @@ const Individual * GeneticHGS::getBestFound() const
 	return nullptr;
 }
 
-void GeneticHGS::run(std::ostream * logStream)
+void GeneticHGS::run(std::ostream * logStream, int traceEvery)
 {
+	if (traceEvery < 1)
+		throw std::invalid_argument("traceEvery must be positive");
+	evaluatedTours = 0;
 	auto tStart = std::chrono::steady_clock::now();
 	auto elapsed = [&]() -> double {
-		return std::chrono::duration_cast<std::chrono::milliseconds>(
-			std::chrono::steady_clock::now() - tStart).count() / 1000.0;
+		return std::chrono::duration<double>(
+			std::chrono::steady_clock::now() - tStart).count();
+	};
+	int lastCompletedIteration = 0;
+	int lastTracedIteration = -1;
+	std::uint64_t lastTracedTours = 0;
+	auto writeTrace = [&](int iteration) {
+		if (!logStream) return;
+		*logStream << std::setprecision(17)
+			<< elapsed() << ',' << iteration << ',' << evaluatedTours << ','
+			<< bestSolution.eval.penalizedCost << '\n';
+		lastTracedIteration = iteration;
+		lastTracedTours = evaluatedTours;
 	};
 
 	// --- Initial population ---
@@ -319,14 +335,47 @@ void GeneticHGS::run(std::ostream * logStream)
 		for (int b = 0; b < curBatch; b++)
 		{
 			batch[b] = new Individual(params, gpuMode);
-			if (params.ap.optionalVisit && (i + b) >= initSize * 4 / 5)
+			if (params.ap.optionalVisit)
 			{
-				std::uniform_real_distribution<double> skipProb(0.1, 0.3);
-				double pSkip = skipProb(params.ran);
-				std::uniform_real_distribution<double> coin(0.0, 1.0);
-				for (int c = 1; c <= params.nbClients; c++)
-					if (coin(params.ran) < pSkip)
-						batch[b]->clientVisited[c] = false;
+				const int optionalSeed = i + b;
+				if (optionalSeed == 0)
+				{
+					// The empty prize-collecting solution is always feasible and is
+					// therefore a mandatory upper-bound seed.  Without it, low skip
+					// penalties can leave HGS reporting a solution worse than this
+					// trivial baseline for the entire run.
+					std::fill(batch[b]->clientVisited.begin(),
+						batch[b]->clientVisited.end(), false);
+				}
+				else if (optionalSeed <= 3)
+				{
+					// Add deterministic penalty-aware subsets spanning 25%, 50%, and
+					// 75% of the clients.  High-penalty clients are visited first;
+					// crossover and toggle mutations can then refine these masks.
+					std::vector<int> clientsByPenalty(params.nbClients);
+					std::iota(clientsByPenalty.begin(), clientsByPenalty.end(), 1);
+					std::stable_sort(
+						clientsByPenalty.begin(), clientsByPenalty.end(),
+						[&](int lhs, int rhs) {
+							return params.cli[lhs].skipPenalty >
+								params.cli[rhs].skipPenalty;
+						});
+					std::fill(batch[b]->clientVisited.begin(),
+						batch[b]->clientVisited.end(), false);
+					const int selected =
+						(params.nbClients * optionalSeed + 3) / 4;
+					for (int rank = 0; rank < selected; ++rank)
+						batch[b]->clientVisited[clientsByPenalty[rank]] = true;
+				}
+				else if (optionalSeed >= initSize * 4 / 5)
+				{
+					std::uniform_real_distribution<double> skipProb(0.1, 0.3);
+					double pSkip = skipProb(params.ran);
+					std::uniform_real_distribution<double> coin(0.0, 1.0);
+					for (int c = 1; c <= params.nbClients; c++)
+						if (coin(params.ran) < pSkip)
+							batch[b]->clientVisited[c] = false;
+				}
 			}
 			educate(*batch[b]);
 		}
@@ -345,6 +394,7 @@ void GeneticHGS::run(std::ostream * logStream)
 	if (params.verbose)
 		std::cout << "----- INITIAL POPULATION COMPLETE  best=" << bestSolution.eval.penalizedCost
 				  << "  pop=" << population.size() << std::endl;
+	writeTrace(0);
 
 	// --- Main genetic loop ---
 	auto tMainStart = std::chrono::steady_clock::now();
@@ -396,6 +446,9 @@ void GeneticHGS::run(std::ostream * logStream)
 					}
 				}
 				nbIterNonProd = 0;
+				lastCompletedIteration = iter;
+				if (iter % traceEvery == 0)
+					writeTrace(iter);
 				continue;
 			}
 			else
@@ -422,11 +475,9 @@ void GeneticHGS::run(std::ostream * logStream)
 				nbIterNonProd++;
 		}
 
-		if (logStream)
-		{
-			*logStream << elapsed() << " " << iter << " " << bestSolution.eval.penalizedCost << "\n";
-			logStream->flush();
-		}
+		lastCompletedIteration = iter;
+		if (iter % traceEvery == 0)
+			writeTrace(iter);
 
 		if (params.verbose && iter % params.ap.freqPrint == 0)
 		{
@@ -443,6 +494,10 @@ void GeneticHGS::run(std::ostream * logStream)
 	}
 
 	for (auto* p : offspringPool) delete p;
+	if (logStream &&
+		(lastTracedIteration != lastCompletedIteration ||
+		 lastTracedTours != evaluatedTours))
+		writeTrace(lastCompletedIteration);
 
 	double mainLoopTime = std::chrono::duration_cast<std::chrono::milliseconds>(
 		std::chrono::steady_clock::now() - tMainStart).count() / 1000.0;

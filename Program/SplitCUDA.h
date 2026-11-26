@@ -6,7 +6,13 @@
 #include "Individual.h"
 #include <cuda_runtime.h>
 #include <omp.h>
+#include <cstddef>
+#include <cstdlib>
 #include <cstring>
+#include <iostream>
+#include <new>
+#include <stdexcept>
+#include <string>
 
 
 struct ClientSplitCUDA
@@ -58,7 +64,7 @@ class SplitCUDA
   const int idx_dnext = 4;
 
   const Params & params ;
-  int * maxVehicles ;
+  int * maxVehicles = nullptr;
   std::vector<int> maxVehicles_host;
 
   int n,m,n_scen;
@@ -66,38 +72,91 @@ class SplitCUDA
 
   /* Auxiliary data structures to run the Linear Split algorithm */
   // std::vector < ClientSplitCUDA > cliSplit;
-  double * cliSplit_demand;
-  double * cliSplit_serviceTime;
-  double * cliSplit_d0_x;
-  double * cliSplit_dx_0;
-  double * cliSplit_dnext;
+  double * cliSplit_demand = nullptr;
+  double * cliSplit_serviceTime = nullptr;
+  double * cliSplit_d0_x = nullptr;
+  double * cliSplit_dx_0 = nullptr;
+  double * cliSplit_dnext = nullptr;
   //  std::vector < std::vector < double > > potential;  // Potential vector
-  double * potential;
+  double * potential = nullptr;
   // std::vector < std::vector < int > > pred;  // Indice of the predecessor in an optimal path
-  int * pred;
-  int * pred_host;
+  int * pred = nullptr;
+  int * pred_host = nullptr;
   // std::vector <double> sumDistance; // sumDistance[i] for i > 1 contains the sum of distances : sum_{k=1}^{i-1} d_{k,k+1}
-  double * sumDistance;
+  double * sumDistance = nullptr;
   // std::vector <double> sumLoad; // sumLoad[i] for i >= 1 contains the sum of loads : sum_{k=1}^{i} q_k
-  double * sumLoad;
+  double * sumLoad = nullptr;
   // std::vector <double> sumService; // sumService[i] for i >= 1 contains the sum of service time : sum_{k=1}^{i} s_k
-  double * sumService;
+  double * sumService = nullptr;
 
-  double * totalDemands;
-  int * myDeque;
-  double * demand_host;
-  double * host_d0_x;
-  double * host_dx_0;
-  double * host_sumDistance;
-  cudaStream_t stream;
+  double * totalDemands = nullptr;
+  int * myDeque = nullptr;
+  double * demand_host = nullptr;
+  double * host_d0_x = nullptr;
+  double * host_dx_0 = nullptr;
+  double * host_sumDistance = nullptr;
+  bool predHostPinned = false;
+  bool demandHostPinned = false;
+  bool d0HostPinned = false;
+  bool dxHostPinned = false;
+  bool sumDistanceHostPinned = false;
+  cudaStream_t stream = nullptr;
 
   // GPU eval members
-  double * d_timeCost;      // [m_full * m_full] distance matrix on device
-  int * d_chromT;           // [maxBatchSize * nbClients] chromT on device
-  int * h_chromT;           // pinned host chromT staging
-  double * d_evalResults;   // [maxBatchSize * n_scen * 4] per-scen results (dist,capEx,durEx,nRoutes)
-  double * h_evalResults;   // pinned host for results
-  int m_full;               // original m = nbClients+1 (never changes with setActiveClients)
+  double * d_timeCost = nullptr;      // [m_full * m_full] distance matrix on device
+  double * d_allClientDemands = nullptr; // [m_full * n_scen], uploaded once
+  int * d_chromT = nullptr;           // [maxBatchSize * nbClients] chromT on device
+  int * h_chromT = nullptr;           // pinned host chromT staging
+  double * d_evalResults = nullptr;   // [maxBatchSize * n_scen * 4] per-scen results (dist,capEx,durEx,nRoutes)
+  double * d_meanCostSums = nullptr;  // [maxBatchSize] exact-solver GPU reductions
+  double * h_evalResults = nullptr;   // pinned host for results
+  bool chromTHostPinned = false;
+  bool evalResultsHostPinned = false;
+  int m_full = 0;                     // original m = nbClients+1 (never changes with setActiveClients)
+  std::size_t freeBeforeBytes = 0;
+  std::size_t freeAfterBytes = 0;
+  std::size_t allocatedDeviceBytes = 0;
+  std::size_t requestedDeviceBytes = 0;
+
+  template <typename T>
+  static void allocateHostBuffer(
+      T *& buffer, std::size_t count, bool & isPinned, const char * label)
+  {
+    const std::size_t bytes = count * sizeof(T);
+    void * raw = nullptr;
+    const cudaError_t status = cudaMallocHost(&raw, bytes);
+    if (status == cudaSuccess)
+    {
+      buffer = static_cast<T *>(raw);
+      isPinned = true;
+      return;
+    }
+
+    // WSL and container runtimes can impose a much smaller pinned-memory
+    // ceiling than either system RAM or device RAM.  Pageable memory remains
+    // valid for cudaMemcpyAsync (the runtime stages it as needed), so use it as
+    // a correctness-preserving fallback for million-scenario experiments.
+    cudaGetLastError();
+    buffer = static_cast<T *>(std::malloc(bytes));
+    if (buffer == nullptr)
+      throw std::bad_alloc();
+    isPinned = false;
+    std::cerr << "GPU_HOST_MEMORY_FALLBACK buffer=" << label
+              << " bytes=" << bytes
+              << " cuda_error=\"" << cudaGetErrorString(status) << "\"\n";
+  }
+
+  template <typename T>
+  static void freeHostBuffer(T *& buffer, bool isPinned) noexcept
+  {
+    if (buffer == nullptr)
+      return;
+    if (isPinned)
+      cudaFreeHost(buffer);
+    else
+      std::free(buffer);
+    buffer = nullptr;
+  }
 
 
 
@@ -225,8 +284,17 @@ public:
   void generate_split_batch(int batchSize);
   void reconstruct_from_pred_batch(std::vector<Individual*>& indivs);
   int getMaxBatchSize() const { return maxBatchSize; }
+  std::size_t getFreeBeforeBytes() const { return freeBeforeBytes; }
+  std::size_t getFreeAfterBytes() const { return freeAfterBytes; }
+  std::size_t getAllocatedDeviceBytes() const { return allocatedDeviceBytes; }
+  std::size_t getRequestedDeviceBytes() const { return requestedDeviceBytes; }
 
   void evaluateOnGPU_batch(std::vector<Individual*>& indivs);
+  // Exact solvers only need one stochastic mean cost per giant tour.  This
+  // path performs the scenario reduction on the device and transfers O(batch)
+  // values instead of O(batch * scenarios) per-scenario diagnostics.
+  std::vector<double> evaluateMeanCostsOnGPU_batch(
+      std::vector<Individual*>& indivs);
   void deriveSuccessorsPredecessors_batch(std::vector<Individual*>& indivs);
 
   int getOriginalM() const { return params.nbClients + 1; }
@@ -245,63 +313,134 @@ public:
 //     }
     SplitCUDA(const Params & params, int batchSz = 1): params(params)
     {
+      if (batchSz < 1)
+        throw std::invalid_argument("SplitCUDA batch capacity must be positive");
       n = params.nbVehicles + 1;
       m = params.nbClients + 1;
       n_scen = params.n_scenarios;
       maxBatchSize = batchSz;
       size_t B = (size_t)maxBatchSize;
-      size_t nst = B * n_scen;
-      cudaMalloc(&potential, nst * m * sizeof(double));
-      cudaMalloc(&pred, nst * m * sizeof(int));
-      cudaMallocHost(&pred_host, nst * m * sizeof(int));
-      cudaMallocHost(&demand_host, (size_t)m * nst * sizeof(double));
+      size_t nst = B * static_cast<size_t>(n_scen);
+      const size_t nodeCount = static_cast<size_t>(m);
+      const size_t scenarioNodeEntries = nst * nodeCount;
+      const size_t clientCount = nodeCount - 1;
+      requestedDeviceBytes =
+          scenarioNodeEntries * (3 * sizeof(double) + 2 * sizeof(int)) +
+          B * nodeCount * 3 * sizeof(double) +
+          nodeCount * 3 * sizeof(double) +
+          static_cast<size_t>(n_scen) * sizeof(double) +
+          nodeCount * static_cast<size_t>(n_scen) * sizeof(double) +
+          nodeCount * nodeCount * sizeof(double) +
+          B * clientCount * sizeof(int) +
+          nst * 4 * sizeof(double) +
+          B * sizeof(double);
+
+      // Initialize the CUDA runtime before taking the baseline.  All device
+      // buffers owned by SplitCUDA are persistent and allocated below, so this
+      // delta is a deterministic allocation footprint rather than a sampled
+      // process-wide peak.
+      cudaCheck(cudaFree(0), "cudaFree(0)");
+      size_t totalBeforeBytes = 0;
+      cudaCheck(cudaMemGetInfo(&freeBeforeBytes, &totalBeforeBytes),
+                "cudaMemGetInfo before SplitCUDA allocation");
+      cudaCheck(cudaMalloc(&potential, nst * m * sizeof(double)), "cudaMalloc potential");
+      cudaCheck(cudaMalloc(&pred, nst * m * sizeof(int)), "cudaMalloc pred");
+      allocateHostBuffer(pred_host, nst * m, predHostPinned, "pred");
+      allocateHostBuffer(demand_host, (size_t)m * nst, demandHostPinned, "demand");
       std::memset(demand_host, 0, (size_t)m * nst * sizeof(double));
-      cudaMallocHost(&host_d0_x, B * m * sizeof(double));
-      cudaMallocHost(&host_dx_0, B * m * sizeof(double));
-      cudaMallocHost(&host_sumDistance, B * m * sizeof(double));
-      cudaMalloc(&sumLoad, nst * m * sizeof(double));
-      cudaMalloc(&sumDistance, B * m * sizeof(double));
-      cudaMalloc(&sumService, m * sizeof(double));
-      cudaMalloc(&cliSplit_demand, nst * m * sizeof(double));
-      cudaMalloc(&cliSplit_serviceTime, m * sizeof(double));
-      cudaMalloc(&cliSplit_d0_x, B * m * sizeof(double));
-      cudaMalloc(&cliSplit_dx_0, B * m * sizeof(double));
-      cudaMalloc(&cliSplit_dnext, m * sizeof(double));
-      cudaMalloc(&totalDemands, n_scen * sizeof(double));
-      copy_vec(params.totalDemands, totalDemands, n_scen);
+      allocateHostBuffer(host_d0_x, B * m, d0HostPinned, "d0_x");
+      allocateHostBuffer(host_dx_0, B * m, dxHostPinned, "dx_0");
+      allocateHostBuffer(
+          host_sumDistance, B * m, sumDistanceHostPinned, "sumDistance");
+      cudaCheck(cudaMalloc(&sumLoad, nst * m * sizeof(double)), "cudaMalloc sumLoad");
+      cudaCheck(cudaMalloc(&sumDistance, B * m * sizeof(double)), "cudaMalloc sumDistance");
+      cudaCheck(cudaMalloc(&sumService, m * sizeof(double)), "cudaMalloc sumService");
+      cudaCheck(cudaMalloc(&cliSplit_demand, nst * m * sizeof(double)), "cudaMalloc Split demand");
+      cudaCheck(cudaMalloc(&cliSplit_serviceTime, m * sizeof(double)), "cudaMalloc service time");
+      cudaCheck(cudaMalloc(&cliSplit_d0_x, B * m * sizeof(double)), "cudaMalloc d0_x");
+      cudaCheck(cudaMalloc(&cliSplit_dx_0, B * m * sizeof(double)), "cudaMalloc dx_0");
+      cudaCheck(cudaMalloc(&cliSplit_dnext, m * sizeof(double)), "cudaMalloc dnext");
+      cudaCheck(cudaMalloc(&totalDemands, n_scen * sizeof(double)), "cudaMalloc total demands");
+      cudaCheck(cudaMemcpy(totalDemands, params.totalDemands,
+                           n_scen * sizeof(double), cudaMemcpyHostToDevice),
+                "copy total demands");
       maxVehicles_host = std::vector<int>(nst);
-      cudaStreamCreate(&stream);
-      cudaMalloc(&myDeque, nst * m * sizeof(int));
+      cudaCheck(cudaStreamCreate(&stream), "cudaStreamCreate");
+      cudaCheck(cudaMalloc(&myDeque, nst * m * sizeof(int)), "cudaMalloc deque");
 
       // GPU eval buffers
       m_full = m;
-      cudaMalloc(&d_timeCost, (size_t)m * m * sizeof(double));
+      cudaCheck(cudaMalloc(&d_timeCost, (size_t)m * m * sizeof(double)), "cudaMalloc timeCost");
       // Flatten and upload timeCost
       std::vector<double> flat_tc((size_t)m * m);
       for (int i = 0; i < m; i++)
         for (int j = 0; j < m; j++)
           flat_tc[i * m + j] = params.timeCost[i][j];
-      cudaMemcpy(d_timeCost, flat_tc.data(), m * m * sizeof(double), cudaMemcpyHostToDevice);
+      cudaCheck(cudaMemcpy(d_timeCost, flat_tc.data(), m * m * sizeof(double),
+                           cudaMemcpyHostToDevice), "copy timeCost");
+
+      cudaCheck(cudaMalloc(
+          &d_allClientDemands,
+          nodeCount * static_cast<size_t>(n_scen) * sizeof(double)),
+          "cudaMalloc all client demands");
+      std::vector<double> flatDemands(
+          nodeCount * static_cast<size_t>(n_scen), 0.0);
+      for (int client = 1; client < m; ++client) {
+        const std::vector<double>& source =
+            params.cli[client].demands_scenarios;
+        if (source.size() != static_cast<std::size_t>(n_scen))
+          throw std::runtime_error("SplitCUDA scenario demand size mismatch");
+        std::memcpy(
+            flatDemands.data() + static_cast<std::size_t>(client) * n_scen,
+            source.data(), static_cast<std::size_t>(n_scen) * sizeof(double));
+      }
+      cudaCheck(cudaMemcpy(
+          d_allClientDemands, flatDemands.data(),
+          flatDemands.size() * sizeof(double), cudaMemcpyHostToDevice),
+          "copy all client demands");
 
       int nbCli = m - 1;
-      cudaMalloc(&d_chromT, B * nbCli * sizeof(int));
-      cudaMallocHost(&h_chromT, B * nbCli * sizeof(int));
-      cudaMalloc(&d_evalResults, nst * 4 * sizeof(double));
-      cudaMallocHost(&h_evalResults, nst * 4 * sizeof(double));
+      cudaCheck(cudaMalloc(&d_chromT, B * nbCli * sizeof(int)), "cudaMalloc chromT");
+      allocateHostBuffer(h_chromT, B * nbCli, chromTHostPinned, "chromT");
+      cudaCheck(cudaMalloc(&d_evalResults, nst * 4 * sizeof(double)), "cudaMalloc eval results");
+      cudaCheck(cudaMalloc(&d_meanCostSums, B * sizeof(double)), "cudaMalloc mean cost sums");
+      allocateHostBuffer(
+          h_evalResults, nst * 4, evalResultsHostPinned, "evalResults");
+      size_t totalAfterBytes = 0;
+      cudaCheck(cudaMemGetInfo(&freeAfterBytes, &totalAfterBytes),
+                "cudaMemGetInfo after SplitCUDA allocation");
+      allocatedDeviceBytes = freeBeforeBytes >= freeAfterBytes
+          ? freeBeforeBytes - freeAfterBytes
+          : 0;
     }
 
     ~SplitCUDA() {
-      cudaStreamDestroy(stream);
-      cudaFreeHost(pred_host);
-      cudaFreeHost(demand_host);
-      cudaFreeHost(host_d0_x);
-      cudaFreeHost(host_dx_0);
-      cudaFreeHost(host_sumDistance);
+      cudaFree(potential);
+      cudaFree(pred);
+      cudaFree(sumLoad);
+      cudaFree(sumDistance);
+      cudaFree(sumService);
+      cudaFree(cliSplit_demand);
+      cudaFree(cliSplit_serviceTime);
+      cudaFree(cliSplit_d0_x);
+      cudaFree(cliSplit_dx_0);
+      cudaFree(cliSplit_dnext);
+      cudaFree(totalDemands);
+      cudaFree(myDeque);
       cudaFree(d_timeCost);
+      cudaFree(d_allClientDemands);
       cudaFree(d_chromT);
-      cudaFreeHost(h_chromT);
       cudaFree(d_evalResults);
-      cudaFreeHost(h_evalResults);
+      cudaFree(d_meanCostSums);
+      freeHostBuffer(pred_host, predHostPinned);
+      freeHostBuffer(demand_host, demandHostPinned);
+      freeHostBuffer(host_d0_x, d0HostPinned);
+      freeHostBuffer(host_dx_0, dxHostPinned);
+      freeHostBuffer(host_sumDistance, sumDistanceHostPinned);
+      freeHostBuffer(h_chromT, chromTHostPinned);
+      freeHostBuffer(h_evalResults, evalResultsHostPinned);
+      if (stream != nullptr)
+        cudaStreamDestroy(stream);
     }
 
     void reset();

@@ -1,83 +1,68 @@
-# VRPSD and PCTSP Split solvers
+# PCTSP-exact with level-synchronous branch-and-bound
 
-This branch maintains the CPU and CUDA Split evaluators for vehicle routing with stochastic demands and the optional-visit prize-collecting variant. The search is based on [HGS-CVRP](https://github.com/vidalt/HGS-CVRP). For the ICLR experiments, use the [paper snapshot](https://github.com/Jingyi-poly/2-stage-MIP-GPU/tree/5ac5cb954d928bbc0407a5a9ffb1ed25ae5f14a9) and the [paper](https://arxiv.org/abs/2602.05179v3).
+This branch implements the optional-visit, finite-scenario stochastic
+prize-collecting routing model. SCIP solves node LP relaxations in CPU
+worker waves. The master batches integral tours at a level barrier, evaluates
+their Split recourse with OpenMP or CUDA, and adds integer L-shaped cuts.
+The bounds in the trace are certified at completed barriers.
 
-## CPU quick start
+The objective adds the skip penalties of omitted customers to the scenario
+mean of capacity-penalized Split cost. Split allows an unrestricted number
+of routes. An optimality certificate applies to this finite scenario model and
+the recorded numerical tolerances. The solution file gives the selected
+customers and their visit order. Use the [VRPSD and PCTSP-HGS branch](https://github.com/Jingyi-poly/2-stage-MIP-GPU/tree/solver/vrpsd-pctsp)
+for heuristic search.
 
-Use CMake 3.18 or later and a C++17 compiler with OpenMP, such as GCC on Linux or WSL. CTest also uses a C compiler. Run the commands from the repository root.
+## Build and verify
+
+The CPU build uses CMake 3.18+, a C++17 compiler with OpenMP, and the
+[SCIP Optimization Suite](https://www.scipopt.org/) CMake package.
+Set `-DSCIP_DIR=/path/to/lib/cmake/scip` if CMake needs the package location.
 
 ```sh
+git clone --branch solver/pctsp-exact --single-branch https://github.com/Jingyi-poly/2-stage-MIP-GPU.git
+cd 2-stage-MIP-GPU
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 mkdir -p results
-./build/hgs Instances/CVRP/X-n106-k14.vrp results/vrpsd.sol \
-    -seed 1 -nthreads 2 -nextrascen 7 -iterLim 1
-./build/hgs Instances/CVRP/X-n106-k14.vrp results/pctsp-hgs.sol \
-    -seed 1 -nthreads 2 -nextrascen 7 -iterLim 1 -optionalVisit 1
+./build/pctsp_level_exact Test/tiny-n5-k2.vrp results/pctsp-level.sol \
+    -scenarioSeed 11 -penaltySeed 1729 -algoSeed 1 -nextrascen 3 \
+    -optionalVisit 1 -skipPenScale 1.2 -timeLim 30 -nthreads 2 \
+    -gpuBatchSize 8 -traceFile results/pctsp-level.csv
 ```
 
-The solver writes nominal routes and the reported penalized objective to the specified solution file. For optional visits, the routes list selected customers only. The objective averages the nominal demand scenario and the additional generated scenarios. The solver reports run progress on standard output.
+The tests compare both SCIP solvers against enumeration on a small instance.
+`-nextrascen K` adds `K` stochastic draws to one base slot. In the level
+solver, `-nthreads` sets the number of CPU node workers and `-gpuBatchSize`
+sets the number of tours in an evaluation batch, on either backend.
 
-| Option | Use |
-| --- | --- |
-| `-nextrascen N` | Generate `N` additional scenarios, for `N+1` scenarios total. |
-| `-seed S`, `-nthreads T` | Set the seed and the number of CPU threads. |
-| `-iterLim I`, `-timeLim S` | Set the iteration limit or a wall-clock budget in seconds. |
-| `-maxClient C` | Limit the instance to its first `C` customers. |
-| `-optionalVisit 1`, `-skipPenScale X` | Allow customer omission and set the skip-penalty multiplier. |
+### CUDA recourse
 
-## Score a fixed visit order
-
-`cross_validate` takes a plain-text permutation of all customers in the instance. It reports the capacity-only CPU Split objective and a quadratic reference on the same seeded scenarios.
-
-```sh
-./build/cross_validate Instances/CVRP/X-n106-k14.vrp \
-    Instances/CVRP/X-n106-k14.vrp.cvrp_chromT.txt -seed 1 -nextrascen 7 -nthreads 2
-```
-
-## Optional CUDA build
-
-Install a CUDA toolkit and a compatible NVIDIA driver. Supply the CUDA architecture for your GPU. The example uses compute capability 7.5.
+Install a CUDA toolkit and driver. Set the CUDA architecture to match the
+GPU. The following example targets a Turing GPU.
 
 ```sh
 cmake -S . -B build_cuda -DCMAKE_BUILD_TYPE=Release -DENABLE_CUDA=ON \
-    -DCMAKE_CUDA_ARCHITECTURES=75
+    -DCMAKE_CUDA_ARCHITECTURES=75 -DENABLE_GPU_TESTS=ON
 cmake --build build_cuda --parallel
-ctest --test-dir build_cuda --output-on-failure
-mkdir -p results
-./build_cuda/hgs_cuda Instances/CVRP/X-n106-k14.vrp results/vrpsd-cuda.sol \
-    -seed 1 -nthreads 2 -nextrascen 7 -iterLim 1 -gpuBatchSize 1
+ctest --test-dir build_cuda -R 'fixed_tour_cpu_cuda|pctsp_level_exact_cuda_tiny' --output-on-failure
 ```
 
-CTest checks the CPU and CUDA objectives on the same fixed tour and eight scenarios. This check passed with GCC 13 and CUDA 12.6 on an RTX 2080 Ti. Use `-DCMAKE_CUDA_COMPILER=/path/to/nvcc` when the toolkit is installed outside the usual search paths.
+`pctsp_level_exact_cuda` uses the same SCIP algorithm and evaluates tours
+with CUDA Split. Use the CPU example's options plus `-deviceId 0`. For
+comparison, `pctsp_scip_outer` and `pctsp_scip_outer_cuda` keep SCIP's own
+outer search. The optional `ENABLE_GUROBI` targets `pctsp_exact` and
+`pctsp_exact_cuda` refer to the legacy baselines.
 
-## Optional Gurobi baselines
+## Manuscript scenario-count experiment
 
-Set `GUROBI_HOME` to the Gurobi SDK directory containing `include/` and `lib/`. The binaries require a license at runtime and print their results to standard output.
+[Figure 11 protocol and reference values](reproduction/figure-11/README.md)
+record the weighted CPU configuration, fixed skip penalties, and evaluation
+settings for the first six customers of `X-n101-k25`. The corresponding
+source adds lossless aggregation of identical scenario vectors to CPU
+tour scoring. The search checks the weighted score against uncompressed
+evaluation on a reference tour before branching. Other demand models use
+the uncompressed OpenMP oracle.
 
-```sh
-cmake -S . -B build_gurobi -DCMAKE_BUILD_TYPE=Release -DENABLE_GUROBI=ON \
-    -DGUROBI_HOME="$GUROBI_HOME"
-cmake --build build_gurobi --parallel
-mkdir -p results
-./build_gurobi/pctsp_exact Instances/CVRP/X-n106-k14.vrp results/gurobi.sol \
-    -seed 1 -nthreads 1 -maxClient 6 -nextrascen 7 -timeLim 25 -optionalVisit 0
-```
-
-| Executable | Mode |
-| --- | --- |
-| `pctsp_exact` | With `-optionalVisit 0`, solves the all-visit stochastic MILP. With `-optionalVisit 1`, solves a deterministic optional-visit model, then improves it with stochastic local search. |
-| `pctsp_exact_cuda` | Built when both options are enabled. Uses GPU Split in the all-visit Benders path. |
-| `cvrp_exact` | Separate two-stage CVRP Gurobi baseline in `pctsp_exact/`. Configure it with `cmake -S pctsp_exact -B build_cvrp_exact -DGUROBI_HOME="$GUROBI_HOME"` and build that directory. |
-
-The Gurobi targets build with Gurobi 12.0.1. The runtime check requires a configured license.
-
-## Benchmarks and project files
-
-- `Program/` contains the split operators and solver entry points. `Test/` contains CTest checks.
-- `Instances/CVRP/` contains benchmark inputs and fixed permutations used for scoring. `pctsp/` contains the Python PCTSP baselines and their input instances. `baseline/` and `exact_baseline.py` provide additional CVRP baseline tools.
-- `scripts/bench_split.sh BASELINE_GPU OPTIMIZED_GPU [REPEATS] [OUTPUT_DIR]` runs matching seeded, single-candidate CUDA timings and saves the per-run logs and CSV. The baseline is [d29b135](https://github.com/Jingyi-poly/2-stage-MIP-GPU/tree/d29b135fe95f27ca61e2454c926ec2aa275f036b), immediately before the batched optimization. Pass each revision's `hgs_cuda` executable path.
-- The [original development snapshot](https://github.com/Jingyi-poly/2-stage-MIP-GPU/tree/8f7f7cd5ba6881ad11c9739ac3c7f71e18541fef) preserves earlier analysis scripts, figures, and outputs. Keep new runs in `results/` and local build directories.
-
-See [LICENSE](LICENSE) for the HGS-CVRP MIT notice.
+The Split/HGS code retains the upstream MIT notice in [LICENSE](LICENSE).

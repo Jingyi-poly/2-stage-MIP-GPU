@@ -24,6 +24,7 @@ SOFTWARE.*/
 #define INDIVIDUAL_H
 
 #include "Params.h"
+#include <cstdint>
 
 struct EvalIndiv
 {
@@ -49,7 +50,10 @@ struct EvalIndivMultiScen
 	std::vector<double> distanceScen;			// Total distance
 	std::vector<double> capacityExcessScen;		// Sum of excess load in all routes
 	std::vector<double> durationExcessScen;		// Sum of excess duration in all routes
-	std::vector<bool> isFeasibleScen;		// Feasibility status of the individual
+	// One byte per scenario keeps parallel writes independent. std::vector<bool>
+	// packs bits into shared words and races when OpenMP workers update adjacent
+	// scenarios concurrently.
+	std::vector<std::uint8_t> isFeasibleScen;	// 0/1 feasibility status
 };
 
 class Individual

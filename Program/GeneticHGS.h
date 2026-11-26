@@ -7,6 +7,7 @@
 #include <vector>
 #include <fstream>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 
 // Generic HGS genetic algorithm.
@@ -20,8 +21,9 @@ public:
 	GeneticHGS(Params & params, EvalFunc evaluator, int batchSize = 1, bool gpuMode = false);
 	~GeneticHGS();
 
-	void run(std::ostream * logStream = nullptr);
+	void run(std::ostream * logStream = nullptr, int traceEvery = 1);
 	const Individual * getBestFound() const;
+	std::uint64_t getEvaluatedTours() const { return evaluatedTours; }
 
 private:
 	Params & params;
@@ -34,6 +36,7 @@ private:
 
 	std::vector<Individual *> population;
 	Individual bestSolution;
+	std::uint64_t evaluatedTours = 0;
 
 	void evaluateBatch(std::vector<Individual*>& batch);
 	void evaluateIndividual(Individual & indiv);

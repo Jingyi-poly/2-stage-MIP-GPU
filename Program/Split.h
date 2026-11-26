@@ -69,6 +69,8 @@ class Split
  // Problem parameters
  const Params & params ;
  int maxVehicles ;
+ int lastNbRoutes;
+ bool lastUsedLimitedFleet;
 
  int idx_scen;
 
@@ -115,7 +117,6 @@ class Split
 
   int splitSimpleReturn(Individual & indiv, int idx_scen, std::vector < std::vector <int> > & chromR_res);
   int splitLFReturn(Individual & indiv, int idx_scen, std::vector < std::vector <int> > & chromR_res);
-  int restoreRoutes(Individual & indiv, int idx_scen, std::vector<std::vector<int>>& routes);
 
 public:
 	int generateChromR(Individual & indiv, int idx_scen);
@@ -123,6 +124,10 @@ public:
 
   // General Split function (tests the unlimited fleet, and only if it does not produce a feasible solution, runs the Split algorithm for limited fleet)
   void generalSplit(Individual & indiv, int nbMaxVehicles, int idx_scen);
+  // Evaluate only the unlimited-fleet Split objective.  This avoids allocating
+  // or reconstructing one route vector per scenario and is intended for fixed
+  // tour evaluator benchmarks and oracle calls.
+  double evaluateUnlimitedFleetCost(Individual & indiv, int idx_scen);
   std::vector < std::vector <int>> generalSplitReturn(Individual & indiv, int nbMaxVehicles, int idx_scen);
 
   // Constructor

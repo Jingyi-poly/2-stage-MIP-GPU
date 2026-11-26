@@ -149,6 +149,8 @@ __global__ void split_simple_nocon( int * myDeque, double * potential,
 					while (indexBack - indexFront + 1 > 0 && dominatesRight){
 						if (debug) printf("   Scenario %d:   dominatesRight? %d...... size %d\n", i_scenario, dominatesRight, indexBack - indexFront + 1);
 						indexBack--;
+						if (indexBack - indexFront + 1 <= 0)
+							break;
 						i = myDeque[indexBack * n_scen + i_scenario];
 						// v1r = potential[i_scenario * (nm) + 0 * n_vehi + ic] + cliSplit_d0_x[per_off + ic + 1];
 						v1r = potential[i_scenario * (nm) + ic] + cliSplit_d0_x[per_off + ic + 1];
@@ -363,7 +365,8 @@ void check(double * tensor, const double * original, int n, int m, int i){
 
 void SplitCUDA::preprocess(Individual & indiv, int nbMaxVehicles)
 {
-	int maxV = std::max<int>(nbMaxVehicles, (int)std::ceil(params.totalDemand / params.vehicleCapacity));
+	int maxV = params.ap.fixedRouteCapacity ? nbMaxVehicles
+		: std::max<int>(nbMaxVehicles, (int)std::ceil(params.totalDemand / params.vehicleCapacity));
 	for (int i = 0; i < n_scen; i++)
 		maxVehicles_host[i] = maxV;
 
@@ -399,6 +402,8 @@ void SplitCUDA::preprocess(Individual & indiv, int nbMaxVehicles)
 
 }
 void SplitCUDA::reset_batch(int batchSize){
+	if (batchSize < 1 || batchSize > maxBatchSize)
+		throw std::invalid_argument("SplitCUDA reset_batch size exceeds allocated capacity");
 	int n_scen_total = batchSize * n_scen;
 	int size = n_scen_total * m;
 	int nthreads = 1024;
@@ -411,20 +416,54 @@ void SplitCUDA::reset_batch(int batchSize){
 	init_with_value_nnz<<<row0_blocks, dim3(nthreads), 0, stream>>>(sumLoad, n_scen_total, 0.0);
 }
 
+__global__ void gather_batch_demands(
+    const double * __restrict__ allClientDemands,
+    const int * __restrict__ chromT,
+    double * __restrict__ gatheredDemands,
+    int batchSize,
+    int activeClients,
+    int nScenarios)
+{
+    const std::size_t index =
+        static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const std::size_t entries = static_cast<std::size_t>(batchSize)
+        * activeClients * nScenarios;
+    if (index >= entries) return;
+    const int scenario = static_cast<int>(index % nScenarios);
+    const std::size_t tourPosition = index / nScenarios;
+    const int batch = static_cast<int>(tourPosition / activeClients);
+    const int position = static_cast<int>(tourPosition % activeClients);
+    const int client = chromT[batch * activeClients + position];
+    const int totalScenarios = batchSize * nScenarios;
+    gatheredDemands[
+        static_cast<std::size_t>(position + 1) * totalScenarios
+        + static_cast<std::size_t>(batch) * nScenarios + scenario]
+        = allClientDemands[
+            static_cast<std::size_t>(client) * nScenarios + scenario];
+}
+
 void SplitCUDA::preprocess_batch(std::vector<Individual*>& indivs, int nbMaxVehicles)
 {
 	int batchSize = (int)indivs.size();
+	if (batchSize < 1 || batchSize > maxBatchSize)
+		throw std::invalid_argument("SplitCUDA preprocess_batch size exceeds allocated capacity");
 	int n_scen_total = batchSize * n_scen;
-	int maxV = std::max<int>(nbMaxVehicles, (int)std::ceil(params.totalDemand / params.vehicleCapacity));
+	int maxV = params.ap.fixedRouteCapacity ? nbMaxVehicles
+		: std::max<int>(nbMaxVehicles, (int)std::ceil(params.totalDemand / params.vehicleCapacity));
 	for (int i = 0; i < n_scen_total; i++)
 		maxVehicles_host[i] = maxV;
 
 	for (int b = 0; b < batchSize; b++)
 	{
 		Individual & indiv = *indivs[b];
-		size_t d_off = (size_t)b * n_scen;
 		size_t p_off = (size_t)b * m;
 		double prev_dnext = 0.0;
+		if ((int)indiv.chromT.size() != params.nbClients)
+			throw std::invalid_argument("SplitCUDA batch tour length differs from active clients");
+		std::memcpy(
+			h_chromT + (size_t)b * params.nbClients,
+			indiv.chromT.data(),
+			(size_t)params.nbClients * sizeof(int));
 
 		host_d0_x[p_off] = 0.0;
 		host_dx_0[p_off] = 0.0;
@@ -433,9 +472,6 @@ void SplitCUDA::preprocess_batch(std::vector<Individual*>& indivs, int nbMaxVehi
 		for (int i = 1; i <= params.nbClients; i++)
 		{
 			int cli_id = indiv.chromT[i - 1];
-			const double * src = params.cli[cli_id].demands_scenarios.data();
-			std::memcpy(demand_host + (size_t)i * n_scen_total + d_off, src, n_scen * sizeof(double));
-
 			host_d0_x[p_off + i] = params.timeCost[0][cli_id];
 			host_dx_0[p_off + i] = params.timeCost[cli_id][0];
 
@@ -450,9 +486,19 @@ void SplitCUDA::preprocess_batch(std::vector<Individual*>& indivs, int nbMaxVehi
 		}
 	}
 
-	size_t demand_bytes = (size_t)m * n_scen_total * sizeof(double);
 	size_t per_indiv_bytes = (size_t)batchSize * m * sizeof(double);
-	cudaMemcpyAsync(cliSplit_demand, demand_host, demand_bytes, cudaMemcpyHostToDevice, stream);
+	cudaMemcpyAsync(
+		d_chromT, h_chromT,
+		(size_t)batchSize * params.nbClients * sizeof(int),
+		cudaMemcpyHostToDevice, stream);
+	const std::size_t gatherEntries = (std::size_t)batchSize
+		* params.nbClients * n_scen;
+	const int gatherThreads = 256;
+	const int gatherBlocks = static_cast<int>(
+		(gatherEntries + gatherThreads - 1) / gatherThreads);
+	gather_batch_demands<<<gatherBlocks, gatherThreads, 0, stream>>>(
+		d_allClientDemands, d_chromT, cliSplit_demand,
+		batchSize, params.nbClients, n_scen);
 	cudaMemcpyAsync(cliSplit_d0_x, host_d0_x, per_indiv_bytes, cudaMemcpyHostToDevice, stream);
 	cudaMemcpyAsync(cliSplit_dx_0, host_dx_0, per_indiv_bytes, cudaMemcpyHostToDevice, stream);
 	cudaMemcpyAsync(sumDistance, host_sumDistance, per_indiv_bytes, cudaMemcpyHostToDevice, stream);
@@ -464,6 +510,8 @@ void SplitCUDA::preprocess_batch(std::vector<Individual*>& indivs, int nbMaxVehi
 }
 
 void SplitCUDA::generate_split_batch(int batchSize){
+	if (batchSize < 1 || batchSize > maxBatchSize)
+		throw std::invalid_argument("SplitCUDA generate_split_batch size exceeds allocated capacity");
 	int n_scen_total = batchSize * n_scen;
 	dim3 threads3(1024);
 	int nblocks = (n_scen_total + 1023) / 1024;
@@ -562,9 +610,127 @@ __global__ void eval_from_pred_kernel(
     evalResults[base + 3] = (double)nRoutes;
 }
 
+// One block group per individual evaluates all scenarios and reduces the
+// penalized Split costs on-device.  At most blocks_per_indiv atomics target a
+// tour sum, avoiding the single-address contention of one atomic per scenario.
+__global__ void eval_mean_from_pred_kernel(
+    const int * __restrict__ pred,
+    const int * __restrict__ chromT,
+    const double * __restrict__ timeCost,
+    const double * __restrict__ cliSplit_demand,
+    double * __restrict__ costSums,
+    int n_scen_per_indiv,
+    int batchSize,
+    int blocks_per_indiv,
+    int ncli,
+    int m_full,
+    double vehicleCapacity,
+    double penaltyCapacity)
+{
+    const int indiv_idx = blockIdx.x / blocks_per_indiv;
+    if (indiv_idx >= batchSize) return;
+    const int block_in_indiv = blockIdx.x - indiv_idx * blocks_per_indiv;
+    const int nbClients = ncli - 1;
+    const int chromT_off = indiv_idx * nbClients;
+    const int n_scen_total = batchSize * n_scen_per_indiv;
+
+    double localSum = 0.0;
+    for (int scenario = block_in_indiv * blockDim.x + threadIdx.x;
+         scenario < n_scen_per_indiv;
+         scenario += blocks_per_indiv * blockDim.x)
+    {
+        const int i_scenario = indiv_idx * n_scen_per_indiv + scenario;
+        double totalDist = 0.0;
+        double totalCapEx = 0.0;
+        int end_pos = nbClients;
+        while (end_pos > 0) {
+            const int begin_pos = pred[i_scenario * ncli + end_pos];
+            const int first_cli = chromT[chromT_off + begin_pos];
+            double dist = timeCost[first_cli];
+            double load = cliSplit_demand[
+                (begin_pos + 1) * n_scen_total + i_scenario];
+            for (int position = begin_pos + 1; position < end_pos; ++position) {
+                const int previous = chromT[chromT_off + position - 1];
+                const int current = chromT[chromT_off + position];
+                dist += timeCost[previous * m_full + current];
+                load += cliSplit_demand[
+                    (position + 1) * n_scen_total + i_scenario];
+            }
+            const int last_cli = chromT[chromT_off + end_pos - 1];
+            dist += timeCost[last_cli * m_full];
+            totalDist += dist;
+            if (load > vehicleCapacity)
+                totalCapEx += load - vehicleCapacity;
+            end_pos = begin_pos;
+        }
+        localSum += totalDist + totalCapEx * penaltyCapacity;
+    }
+
+    extern __shared__ double blockSums[];
+    blockSums[threadIdx.x] = localSum;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride)
+            blockSums[threadIdx.x] += blockSums[threadIdx.x + stride];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0)
+        atomicAdd(costSums + indiv_idx, blockSums[0]);
+}
+
+std::vector<double> SplitCUDA::evaluateMeanCostsOnGPU_batch(
+    std::vector<Individual*>& indivs)
+{
+    const int batchSize = static_cast<int>(indivs.size());
+    if (batchSize < 1 || batchSize > maxBatchSize)
+        throw std::invalid_argument(
+            "SplitCUDA mean-cost batch size exceeds allocated capacity");
+    const int nbClients = m - 1;
+    for (int batch = 0; batch < batchSize; ++batch) {
+        if (static_cast<int>(indivs[batch]->chromT.size()) != nbClients)
+            throw std::invalid_argument(
+                "SplitCUDA mean-cost tour length differs from active clients");
+        std::memcpy(
+            h_chromT + batch * nbClients,
+            indivs[batch]->chromT.data(),
+            static_cast<std::size_t>(nbClients) * sizeof(int));
+    }
+
+    cudaMemcpyAsync(
+        d_chromT, h_chromT,
+        static_cast<std::size_t>(batchSize) * nbClients * sizeof(int),
+        cudaMemcpyHostToDevice, stream);
+    cudaMemsetAsync(
+        d_meanCostSums, 0,
+        static_cast<std::size_t>(batchSize) * sizeof(double), stream);
+
+    constexpr int threads = 256;
+    const int scenarioBlocks = (n_scen + threads - 1) / threads;
+    const int blocksPerIndividual = std::max(1, std::min(256, scenarioBlocks));
+    const int totalBlocks = batchSize * blocksPerIndividual;
+    eval_mean_from_pred_kernel<<<
+        totalBlocks, threads, threads * sizeof(double), stream>>>(
+        pred, d_chromT, d_timeCost, cliSplit_demand, d_meanCostSums,
+        n_scen, batchSize, blocksPerIndividual, m, m_full,
+        params.vehicleCapacity, params.penaltyCapacity);
+    cudaCheck(cudaGetLastError(), "launch mean-cost evaluation");
+
+    std::vector<double> means(batchSize, 0.0);
+    cudaMemcpyAsync(
+        means.data(), d_meanCostSums,
+        static_cast<std::size_t>(batchSize) * sizeof(double),
+        cudaMemcpyDeviceToHost, stream);
+    cudaCheck(cudaStreamSynchronize(stream), "sync mean-cost evaluation");
+    for (double& value : means)
+        value /= static_cast<double>(n_scen);
+    return means;
+}
+
 void SplitCUDA::evaluateOnGPU_batch(std::vector<Individual*>& indivs)
 {
     int batchSize = (int)indivs.size();
+    if (batchSize < 1 || batchSize > maxBatchSize)
+        throw std::invalid_argument("SplitCUDA evaluate batch size exceeds allocated capacity");
     int n_scen_total = batchSize * n_scen;
     int nbClients = m - 1;
 

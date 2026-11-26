@@ -38,6 +38,7 @@ SOFTWARE.*/
 #include <algorithm>
 #include <unordered_set>
 #include <random>
+#include <stdexcept>
 #define MY_EPSILON 0.00001 // Precision parameter, used to avoid numerical instabilities
 #define PI 3.14159265359
 
@@ -83,7 +84,8 @@ public:
 	const std::vector< std::vector< double > >& timeCost;	// Distance matrix
 	std::vector< std::vector< int > > correlatedVertices;	// Neighborhood restrictions: For each client, list of nearby customers
 	bool areCoordinatesProvided;                            // Check if valid coordinates are provided
-	double * totalDemands;
+	double * totalDemands = nullptr;
+	bool skipPenaltiesGenerated = false;
 	int seed;
 	std::mt19937 generator;
 
@@ -99,6 +101,9 @@ public:
 		bool isDurationConstraint,
 		bool verbose,
 		const AlgorithmParameters& ap);
+	~Params();
+	Params(const Params&) = delete;
+	Params& operator=(const Params&) = delete;
 
 
 	void generate_scenario_demands(int n_extra_senarios);
@@ -121,6 +126,17 @@ public:
 		}
 		// nbVehicles = nbClients;
 		std::cout<<"Max ve changed to : "<<nbVehicles<<"\n";
+	}
+
+	void apply_fixed_route_capacity(){
+		if (!ap.fixedRouteCapacity) return;
+		if (isDurationConstraint)
+			throw std::invalid_argument("fixedRouteCapacity only supports unrestricted soft-capacity CVRP/PCTSP without duration constraints");
+		const int previousVehicles = nbVehicles;
+		nbVehicles = nbClients;
+		std::cout << "FIXED_ROUTE_CAPACITY enabled=1 allocated_routes=" << nbVehicles
+			<< " scenario_inflated_routes=" << previousVehicles
+			<< " model=unrestricted_soft_capacity" << std::endl;
 	}
 	
 };

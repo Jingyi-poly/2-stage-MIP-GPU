@@ -6,7 +6,20 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(ENABLE_CUDA "Build the CUDA Split evaluator and solver" OFF)
 option(ENABLE_GUROBI "Build the Gurobi baselines" OFF)
+option(ENABLE_SCIP "Build the SCIP PCTSP solvers" ON)
+option(ENABLE_GPU_TESTS "Run PCTSP tests that require an NVIDIA device" OFF)
 find_package(OpenMP REQUIRED COMPONENTS CXX)
+
+if(ENABLE_SCIP)
+    find_package(SCIP CONFIG REQUIRED)
+    if(TARGET libscip)
+        set(SCIP_TARGET libscip)
+    elseif(TARGET SCIP::libscip)
+        set(SCIP_TARGET SCIP::libscip)
+    else()
+        message(FATAL_ERROR "SCIP does not export a supported libscip target")
+    endif()
+endif()
 
 if(MSVC)
     set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
@@ -43,6 +56,9 @@ if(ENABLE_CUDA)
     set_target_properties(objlib_cuda PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_include_directories(objlib_cuda PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/Program")
     target_link_libraries(objlib_cuda PUBLIC OpenMP::OpenMP_CXX CUDA::cudart)
+    if(CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA" AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(objlib_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp>)
+    endif()
     add_library(lib_cuda SHARED)
     target_link_libraries(lib_cuda PUBLIC objlib_cuda)
     set_target_properties(lib_cuda PROPERTIES OUTPUT_NAME hgscvrp)
@@ -83,6 +99,27 @@ if(ENABLE_GUROBI)
     endif()
 endif()
 
+if(ENABLE_SCIP)
+    set(pctsp_level_sources
+        Program/main_pctsp_level_scip.cpp
+        Program/PCTSPLevelBBSCIP.cpp
+        Program/PCTSPExactSCIP.cpp)
+    add_executable(pctsp_level_exact ${pctsp_level_sources})
+    target_link_libraries(pctsp_level_exact PRIVATE lib_static ${SCIP_TARGET})
+    add_executable(pctsp_scip_outer Program/main_pctsp_scip.cpp Program/PCTSPExactSCIP.cpp)
+    target_link_libraries(pctsp_scip_outer PRIVATE lib_static ${SCIP_TARGET})
+    install(TARGETS pctsp_level_exact pctsp_scip_outer RUNTIME DESTINATION bin)
+
+    if(ENABLE_CUDA)
+        add_executable(pctsp_level_exact_cuda ${pctsp_level_sources})
+        target_compile_definitions(pctsp_level_exact_cuda PRIVATE PCTSP_LEVEL_USE_CUDA=1)
+        target_link_libraries(pctsp_level_exact_cuda PRIVATE lib_static_cuda ${SCIP_TARGET})
+        add_executable(pctsp_scip_outer_cuda Program/main_pctsp_scip_cuda.cpp Program/PCTSPExactSCIP.cpp)
+        target_link_libraries(pctsp_scip_outer_cuda PRIVATE lib_static_cuda ${SCIP_TARGET})
+        install(TARGETS pctsp_level_exact_cuda pctsp_scip_outer_cuda RUNTIME DESTINATION bin)
+    endif()
+endif()
+
 include(CTest)
 if(BUILD_TESTING)
     function(add_hgs_smoke instance max_cost clients round)
@@ -104,6 +141,33 @@ if(BUILD_TESTING)
     add_subdirectory(Test/Test-c)
     add_test(NAME lib_test_c COMMAND lib_test_c)
     set_tests_properties(lib_test_c PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1")
+
+    if(ENABLE_SCIP)
+        add_executable(test_pctsp_level_bb Test/test_pctsp_level_bb_bruteforce.cpp
+            Program/PCTSPLevelBBSCIP.cpp Program/PCTSPExactSCIP.cpp)
+        target_link_libraries(test_pctsp_level_bb PRIVATE lib_static ${SCIP_TARGET})
+        add_executable(test_pctsp_scip_outer Test/test_pctsp_scip_optional_bruteforce.cpp
+            Program/PCTSPExactSCIP.cpp)
+        target_link_libraries(test_pctsp_scip_outer PRIVATE lib_static ${SCIP_TARGET})
+        set(pctsp_fixture "${CMAKE_CURRENT_SOURCE_DIR}/Test/tiny-n5-k2.vrp")
+        add_test(NAME pctsp_level_bb_bruteforce COMMAND test_pctsp_level_bb "${pctsp_fixture}")
+        add_test(NAME pctsp_scip_outer_bruteforce COMMAND test_pctsp_scip_outer "${pctsp_fixture}")
+        set_tests_properties(pctsp_level_bb_bruteforce pctsp_scip_outer_bruteforce
+            PROPERTIES TIMEOUT 120 ENVIRONMENT "OMP_NUM_THREADS=2")
+
+        set(pctsp_smoke_args -scenarioSeed 11 -penaltySeed 1729 -algoSeed 1
+            -nextrascen 3 -optionalVisit 1 -skipPenScale 1.2 -timeLim 30 -nthreads 2 -gpuBatchSize 8 -log 0)
+        add_test(NAME pctsp_level_exact_tiny COMMAND pctsp_level_exact "${pctsp_fixture}"
+            "${CMAKE_CURRENT_BINARY_DIR}/tiny-level-exact.sol" ${pctsp_smoke_args})
+        set_tests_properties(pctsp_level_exact_tiny PROPERTIES
+            PASS_REGULAR_EXPRESSION "proven optimal:[ ]+yes" TIMEOUT 60)
+        if(ENABLE_CUDA AND ENABLE_GPU_TESTS)
+            add_test(NAME pctsp_level_exact_cuda_tiny COMMAND pctsp_level_exact_cuda "${pctsp_fixture}"
+                "${CMAKE_CURRENT_BINARY_DIR}/tiny-level-exact-cuda.sol" ${pctsp_smoke_args} -deviceId 0)
+            set_tests_properties(pctsp_level_exact_cuda_tiny PROPERTIES
+                PASS_REGULAR_EXPRESSION "proven optimal:[ ]+yes" TIMEOUT 60)
+        endif()
+    endif()
 
     if(ENABLE_CUDA)
         add_executable(test_cuda_split Test/TestSplitCUDA.cpp)

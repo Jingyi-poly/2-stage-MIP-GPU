@@ -4,8 +4,10 @@
 void Split::generalSplit(Individual & indiv, int nbMaxVehicles, int idx_scen)
 {
 	// Do not apply Split with fewer vehicles than the trivial (LP) bin packing bound
-	maxVehicles = std::min(params.nbVehicles,
-		std::max<int>(nbMaxVehicles, std::ceil(params.totalDemand/params.vehicleCapacity)));
+	maxVehicles = params.ap.fixedRouteCapacity ? nbMaxVehicles
+		: std::max<int>(nbMaxVehicles, std::ceil(params.totalDemand/params.vehicleCapacity));
+	if (maxVehicles <= 0 || maxVehicles > params.nbVehicles)
+		throw std::string("ERROR : requested Split fleet exceeds allocated routes");
 
 	// Initialization of the data structures for the linear split algorithms
 	// Direct application of the code located at https://github.com/vidalt/Split-Library
@@ -27,40 +29,93 @@ void Split::generalSplit(Individual & indiv, int nbMaxVehicles, int idx_scen)
 	// We first try the simple split, and then the Split with limited fleet if this is not successful
 	if (splitSimple(indiv, idx_scen) == 0) {
 		splitLF(indiv, idx_scen);
-		std::cout<<"Used extra step for idx: "<<idx_scen<<"\n";
 	}
 
 	// Build up the rest of the Individual structure
 	// indiv.evaluateCompleteCost(params);
 }
 
-int Split::generateChromR_single(Individual & indiv)
-{
-	return restoreRoutes(indiv, 0, indiv.chromR);
-}
-
-int Split::generateChromR(Individual & indiv, int idx_scen)
-{
-	return restoreRoutes(indiv, idx_scen, indiv.chromR_scen[idx_scen]);
-}
-
-int Split::restoreRoutes(Individual & indiv, int idx_scen, std::vector<std::vector<int>>& routes)
-{
+int Split::generateChromR_single(Individual & indiv){
+	if (lastNbRoutes <= 0 || lastNbRoutes > params.nbVehicles)
+		throw std::string("ERROR : Split route count is not initialized");
 	int end = params.nbClients;
 	for (int k = params.nbVehicles - 1; k >= 0; k--)
+		indiv.chromR[k].clear();
+	for (int k = lastNbRoutes - 1; k >= 0; k--)
 	{
-		routes[k].clear();
-		if (k >= maxVehicles) continue;
-		const int begin = pred[0][end];
-		for (int i = begin; i < end; i++)
-			routes[k].push_back(indiv.chromT[i]);
+		int begin = lastUsedLimitedFleet ? pred[k + 1][end] : pred[0][end];
+		if (begin < 0 || begin >= end)
+			throw std::string("ERROR : invalid predecessor while rebuilding Split routes");
+		for (int ii = begin; ii < end; ii++)
+			indiv.chromR[k].push_back(indiv.chromT[ii]);
 		end = begin;
 	}
-
-	if (end != 0 && !splitLFReturn(indiv, idx_scen, routes))
-		throw std::runtime_error("Unable to partition the complete tour into the given fleet.");
-	return 0;
+	if (end != 0)
+		throw std::string("ERROR : Split route reconstruction did not reach the depot");
+	return end;
 }
+
+double Split::evaluateUnlimitedFleetCost(Individual & indiv, int idx_scen)
+{
+	if (idx_scen < 0 || idx_scen >= params.n_scenarios)
+		throw std::out_of_range("Split scenario index is out of range");
+	if ((int)indiv.chromT.size() != params.nbClients)
+		throw std::invalid_argument("Split tour length differs from active clients");
+
+	// splitSimple only uses maxVehicles for its boolean return value.  The
+	// benchmarked model has an unlimited route count, so allow one route per
+	// active client and read the propagated objective directly.
+	maxVehicles = params.nbClients;
+	for (int i = 1; i <= params.nbClients; i++)
+	{
+		cliSplit[i].demand =
+			params.cli[indiv.chromT[i - 1]].demands_scenarios[idx_scen];
+		cliSplit[i].serviceTime =
+			params.cli[indiv.chromT[i - 1]].serviceDuration;
+		cliSplit[i].d0_x = params.timeCost[0][indiv.chromT[i - 1]];
+		cliSplit[i].dx_0 = params.timeCost[indiv.chromT[i - 1]][0];
+		cliSplit[i].dnext = i < params.nbClients
+			? params.timeCost[indiv.chromT[i - 1]][indiv.chromT[i]]
+			: -1.e30;
+		sumLoad[i] = sumLoad[i - 1] + cliSplit[i].demand;
+		sumService[i] = sumService[i - 1] + cliSplit[i].serviceTime;
+		sumDistance[i] = sumDistance[i - 1] + cliSplit[i - 1].dnext;
+	}
+
+	splitSimple(indiv, idx_scen);
+	return potential[0][params.nbClients];
+}
+
+int Split::generateChromR(Individual & indiv, int idx_scen){
+	// std::cout<<"!!!!!!!!!! function    "<<idx_scen<<"\n";
+	// for (int p : pred[0]){
+	// 	std::cout<<p<<" , ";
+	// }
+	// std::cout<<"\n";
+
+	if (lastNbRoutes <= 0 || lastNbRoutes > params.nbVehicles)
+		throw std::string("ERROR : Split route count is not initialized");
+	int end = params.nbClients;
+	for (int k = params.nbVehicles - 1; k >= 0; k--)
+		indiv.chromR_scen[idx_scen][k].clear();
+
+	for (int k = lastNbRoutes - 1; k >= 0; k--)
+	{
+		int begin = lastUsedLimitedFleet ? pred[k + 1][end] : pred[0][end];
+		if (begin < 0 || begin >= end)
+			throw std::string("ERROR : invalid predecessor while rebuilding Split routes");
+		for (int ii = begin; ii < end; ii++){
+			indiv.chromR_scen[idx_scen][k].push_back(indiv.chromT[ii]);
+		}
+
+		end = begin;
+	}
+	if (end != 0)
+		throw std::string("ERROR : Split route reconstruction did not reach the depot");
+	return end;
+}
+
+
 
 int Split::splitSimple(Individual & indiv, int idx_scen)
 {
@@ -205,8 +260,19 @@ int Split::splitSimple(Individual & indiv, int idx_scen)
 
 	// 	end = begin;
 	// }
-	// return (end == 0);
-	return true;
+	int end = params.nbClients;
+	int nbRoutes = 0;
+	while (end > 0)
+	{
+		int begin = pred[0][end];
+		if (begin < 0 || begin >= end)
+			throw std::string("ERROR : invalid predecessor chain in Split");
+		end = begin;
+		nbRoutes++;
+	}
+	lastNbRoutes = nbRoutes;
+	lastUsedLimitedFleet = false;
+	return nbRoutes <= maxVehicles;
 }
 
 // Split for problems with limited fleet
@@ -292,6 +358,8 @@ int Split::splitLF(Individual & indiv, int idx_scen)
 	for (int k = 1; k < maxVehicles; k++)
 		if (potential[k][params.nbClients] < minCost)
 			{minCost = potential[k][params.nbClients]; nbRoutes = k;}
+	lastNbRoutes = nbRoutes;
+	lastUsedLimitedFleet = true;
 
 	// Filling the chromR structure
 	for (int k = params.nbVehicles-1; k >= nbRoutes ; k--)
@@ -338,8 +406,9 @@ int Split::splitLF(Individual & indiv, int idx_scen)
 std::vector < std::vector <int>> Split::generalSplitReturn(Individual & indiv, int nbMaxVehicles, int idx_scen)
 {
 	// Do not apply Split with fewer vehicles than the trivial (LP) bin packing bound
-	maxVehicles = std::min(params.nbVehicles,
-		std::max<int>(nbMaxVehicles, std::ceil(params.totalDemand/params.vehicleCapacity)));
+	maxVehicles = std::max<int>(nbMaxVehicles, std::ceil(params.totalDemand/params.vehicleCapacity));
+	if (maxVehicles <= 0 || maxVehicles > params.nbVehicles)
+		throw std::string("ERROR : requested Split fleet exceeds allocated routes");
 
 	// Initialization of the data structures for the linear split algorithms
 	// Direct application of the code located at https://github.com/vidalt/Split-Library
@@ -363,7 +432,6 @@ std::vector < std::vector <int>> Split::generalSplitReturn(Individual & indiv, i
 	if (splitSimpleReturn(indiv, idx_scen, chromR_res) == 0) {
 		chromR_res = std::vector < std::vector <int>>(params.nbVehicles);
 		splitLFReturn(indiv, idx_scen, chromR_res);
-		std::cout<<"Used extra step for idx: "<<idx_scen<<"\n";
 	}
 
 	// Build up the rest of the Individual structure
@@ -441,10 +509,22 @@ int Split::splitSimpleReturn(Individual & indiv, int idx_scen, std::vector < std
 	// for (int k = params.nbVehicles - 1; k >= maxVehicles; k--)
 	// 	indiv.chromR_scen[idx_scen][k].clear();
 
-	int end = params.nbClients;
-	for (int k = maxVehicles - 1; k >= 0; k--)
+	int traceEnd = params.nbClients;
+	int nbRoutes = 0;
+	while (traceEnd > 0)
 	{
-		// indiv.chromR_scen[idx_scen][k].clear();
+		int begin = pred[0][traceEnd];
+		if (begin < 0 || begin >= traceEnd)
+			throw std::string("ERROR : invalid predecessor chain in Split");
+		traceEnd = begin;
+		nbRoutes++;
+	}
+	if (nbRoutes > maxVehicles)
+		return 0;
+
+	int end = params.nbClients;
+	for (int k = nbRoutes - 1; k >= 0; k--)
+	{
 		int begin = pred[0][end];
 		for (int ii = begin; ii < end; ii++){
 			chromR_res[k].push_back(indiv.chromT[ii]);
@@ -541,14 +621,10 @@ int Split::splitLFReturn(Individual & indiv, int idx_scen, std::vector < std::ve
 		if (potential[k][params.nbClients] < minCost)
 			{minCost = potential[k][params.nbClients]; nbRoutes = k;}
 
-	// Filling the chromR structure
-	for (int k = params.nbVehicles-1; k >= nbRoutes ; k--)
-		chromR_res[k].clear();
-
+	// Fill the route vector returned by generalSplitReturn.
 	int end = params.nbClients;
 	for (int k = nbRoutes - 1; k >= 0; k--)
 	{
-		chromR_res[k].clear();
 		int begin = pred[k+1][end];
 		for (int ii = begin; ii < end; ii++)
 			chromR_res[k].push_back(indiv.chromT[ii]);
@@ -583,7 +659,7 @@ int Split::splitLFReturn(Individual & indiv, int idx_scen, std::vector < std::ve
 
 
 
-Split::Split(const Params & params): params(params)
+Split::Split(const Params & params): params(params), maxVehicles(0), lastNbRoutes(0), lastUsedLimitedFleet(false)
 {
 	// Structures of the linear Split
 	cliSplit = std::vector <ClientSplit>(params.nbClients + 1);

@@ -10,6 +10,7 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
+#include <omp.h>
 
 Solution *prepare_solution(Population &population, Params &params)
 {
@@ -55,6 +56,7 @@ extern "C" Solution *solve_cvrp(
 	Solution *result = nullptr;
 
 	try {
+		omp_set_num_threads(ap->nthreads > 0 ? ap->nthreads : 1);
 		std::vector<double> x_coords(x, x + n);
 		std::vector<double> y_coords(y, y + n);
 		std::vector<double> service_time(serv_time, serv_time + n);
@@ -75,8 +77,9 @@ extern "C" Solution *solve_cvrp(
 		}
 
 		Params params(x_coords,y_coords,distance_matrix,service_time,demands,vehicleCapacity,durationLimit,max_nbVeh,isDurationConstraint,verbose,*ap);
-
 		params.generate_scenario_demands(ap->n_extra_senarios);
+		if (max_nbVeh == INT_MAX)
+			params.update_max_vehi();
 		params.generate_skip_penalties();
 
 		// Running HGS and returning the result
@@ -100,6 +103,7 @@ extern "C" Solution *solve_cvrp_dist_mtx(
 	std::vector<double> y_coords;
 
 	try {
+		omp_set_num_threads(ap->nthreads > 0 ? ap->nthreads : 1);
 		if (x != nullptr && y != nullptr) {
 			x_coords = {x, x + n};
 			y_coords = {y, y + n};
@@ -116,8 +120,9 @@ extern "C" Solution *solve_cvrp_dist_mtx(
 		}
 
 		Params params(x_coords,y_coords,distance_matrix,service_time,demands,vehicleCapacity,durationLimit,max_nbVeh,isDurationConstraint,verbose,*ap);
-		
 		params.generate_scenario_demands(ap->n_extra_senarios);
+		if (max_nbVeh == INT_MAX)
+			params.update_max_vehi();
 		params.generate_skip_penalties();
 
 		// Running HGS and returning the result
@@ -133,7 +138,7 @@ extern "C" Solution *solve_cvrp_dist_mtx(
 
 extern "C" void delete_solution(Solution *sol)
 {
-	if (!sol) return;
+	if (sol == nullptr) return;
 	for (int i = 0; i < sol->n_routes; ++i)
 		delete[] sol->routes[i].path;
 
