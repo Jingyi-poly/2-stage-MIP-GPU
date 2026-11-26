@@ -16,6 +16,17 @@ git -C paper-reproduction switch --detach paper/iclr2026-cvrpsd
 
 The separate 100-customer, six-day DSIRP scenario-count experiment starts from the OUIRP implementation. It uses an adapted CPU HGS that shares the first-day route and delivery quantities across scenarios, followed by neighborhood search and a streaming evaluator at larger scenario counts. These extensions identify a separate experiment from the tagged paper implementation.
 
+## Solver branches for the extended results
+
+| Method | Source and quick start |
+| --- | --- |
+| VRPSD-HGS and PCTSP-HGS | [CPU/CUDA Split and HGS](https://github.com/Jingyi-poly/2-stage-MIP-GPU/tree/solver/vrpsd-pctsp). The PCTSP variant enables optional visits. |
+| PCTSP-exact | [SCIP level-synchronous branch-and-bound](https://github.com/Jingyi-poly/2-stage-MIP-GPU/tree/solver/pctsp-exact). The branch documents CPU and CUDA build targets and the exact solver checks. |
+| PDPTW | [Memetic PDPTW solver](https://github.com/Jingyi-poly/2-stage-MIP-GPU/tree/solver/pdptw). The branch documents the stochastic capacity objective, CPU and CUDA evaluators, and Li–Lim examples. |
+| DSIRP-HGS | [Order-up-to inventory routing](https://github.com/Jingyi-poly/2-stage-MIP-GPU/tree/solver/dsirp-hgs). The branch documents the standalone CPU build and GPU RPC setup. |
+
+Each branch documents the inputs needed for its build and examples. To reproduce a particular result, pin the solver revision along with the instance, scenario generator and parameters, seeds, and run budget used for that result.
+
 ## Former branches
 
 | Former branch content | Tag | Commit | Contents to consult |
