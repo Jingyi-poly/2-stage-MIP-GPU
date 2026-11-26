@@ -1,0 +1,13 @@
+/.venv/
+/build*/
+/results/
+/amdahl_sol_data/
+/src/amdahl_sol_data/
+/src/data/bks/iclr_pdptw_*.txt
+/src/data/instance/iclr_pdptw_*.txt
+/.idea/
+/.vscode/
+__pycache__/
+*.py[cod]
+*.lp
+*.log

@@ -1,0 +1,6 @@
+#ifndef AMDAHL_SRC_CONFIG_H_
+#define AMDAHL_SRC_CONFIG_H_
+
+#define AMDAHL_DIR "@AMDAHL_SOURCE_DIR@"
+
+#endif

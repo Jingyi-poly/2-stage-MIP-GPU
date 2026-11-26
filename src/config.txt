@@ -1,0 +1,10 @@
+benchmark=LiLim
+instanceName=LC1_2_1
+bksRouteNum=-1
+additionalVehicleNum=0
+timeLimit=30.0
+resultFolder=amdahl_sol_data
+initialSolFiles=
+scenarioNum=64
+useGpu=0
+useGpuInsertion=0

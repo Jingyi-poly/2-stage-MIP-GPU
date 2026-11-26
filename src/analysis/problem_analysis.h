@@ -1,0 +1,6 @@
+#ifndef AMDAHL_SRC_ANALYSIS_PROBLEM_ANALYSIS_H_
+#define AMDAHL_SRC_ANALYSIS_PROBLEM_ANALYSIS_H_
+
+void AnalysisProblem();
+
+#endif
